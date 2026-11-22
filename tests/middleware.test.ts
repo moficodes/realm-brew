@@ -73,7 +73,8 @@ describe('Middleware HTTP API (Seam 1 - Tilesets & Assets)', () => {
     populateTilesetFolder(bundleDir, '0 • Realm Brew - Man Hewn Dungeons Tiles', 'RB Man Hewn Dungeons - Digital Tiles', 37);
     populateTilesetFolder(bundleDir, '0 • Realm Brew Subterranean Rivers - Digital Tiles', 'Subterranean Rivers - Digital Tiles', 4);
     populateTilesetFolder(bundleDir, '0 • Realm Brew Underdark Caverns - Digital Tiles', 'Realm Brew Underdark Caverns - Digital Tiles', 2);
-    // Should ignore Overlays folders
+    // Should also match folders ending in Tiles without space, while ignoring Overlays
+    populateTilesetFolder(bundleDir, 'CaveTiles', 'Cave', 2);
     const overlaysDir = path.join(bundleDir, '0 • Realm Brew - Man Hewn Dungeons Overlays');
     fs.mkdirSync(overlaysDir, { recursive: true });
     fs.writeFileSync(path.join(overlaysDir, 'Bridge 1.png'), TINY_PNG);
@@ -90,12 +91,13 @@ describe('Middleware HTTP API (Seam 1 - Tilesets & Assets)', () => {
       name: t.name,
       shortCode: t.shortCode,
     }))).toEqual([
+      { id: 'cave', name: 'Cave', shortCode: 'CAV' },
       { id: 'man-hewn-dungeons', name: 'Man Hewn Dungeons', shortCode: 'MHD' },
       { id: 'subterranean-rivers', name: 'Subterranean Rivers', shortCode: 'SR' },
       { id: 'underdark-caverns', name: 'Underdark Caverns', shortCode: 'UC' },
     ]);
 
-    const mhd = body.tilesets[0];
+    const mhd = body.tilesets[1];
     expect(mhd.tiles).toHaveLength(19);
     expect(mhd.tiles[0]).toMatchObject({
       tileId: '01-02',

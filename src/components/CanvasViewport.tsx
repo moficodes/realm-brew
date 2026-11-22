@@ -15,8 +15,13 @@ import {
   zoomCameraAtScreenPoint,
   type Camera,
 } from '../domain/hexGeometry';
-import { findPlacementAt } from '../domain/plannerEngine';
+import {
+  canFlipTarget,
+  findPlacementAt,
+  formatAssemblyLabel,
+} from '../domain/plannerEngine';
 import type { AxialCoord, BrushSelection, Placement, PlacementKey, Tileset } from '../domain/types';
+import { isEditableTarget } from '../utils/browserHelpers';
 
 interface CanvasViewportProps {
   placements: readonly Placement[];
@@ -37,16 +42,6 @@ interface CanvasViewportProps {
   onRemoveAt: (coord: AxialCoord) => void;
   onRotateAction: (delta: 1 | -1) => void;
   onFlipAction: () => void;
-}
-
-function isEditableElement(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.tagName === 'INPUT' ||
-    target.tagName === 'TEXTAREA' ||
-    target.tagName === 'SELECT' ||
-    target.isContentEditable
-  );
 }
 
 export function CanvasViewport({
@@ -130,7 +125,7 @@ export function CanvasViewport({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !isEditableElement(e.target) && !document.querySelector('dialog[open]')) {
+      if (e.code === 'Space' && !isEditableTarget(e.target) && !document.querySelector('dialog[open]')) {
         e.preventDefault();
         setSpacePressed(true);
       }
@@ -238,9 +233,17 @@ export function CanvasViewport({
 
   const selectedPlacement = selectedCoord ? findPlacementAt(placements, selectedCoord) : undefined;
   const activeTarget = activeBrush ?? selectedPlacement;
-  const activeTargetTileset = activeTarget ? tilesetsById.get(activeTarget.tilesetId) : undefined;
-  const activeTargetTile = activeTargetTileset?.tiles.find((t) => t.tileId === activeTarget?.tileId);
-  const canFlipActiveTarget = activeTargetTile ? !activeTargetTile.isSymmetric : false;
+  const activeTargetLabel = activeTarget
+    ? formatAssemblyLabel(activeTarget, tilesetsById)
+    : null;
+  const canFlipActiveTarget = activeTarget ? canFlipTarget(activeTarget, tilesetsById) : false;
+
+  const scheduleClickSuppressionClear = () => {
+    suppressNextClickRef.current = true;
+    window.setTimeout(() => {
+      suppressNextClickRef.current = false;
+    }, 0);
+  };
 
   const cursorClass = isPanning
     ? 'cursor-grabbing'
@@ -340,7 +343,7 @@ export function CanvasViewport({
           const pan = panStateRef.current;
           if (pan && pan.pointerId === e.pointerId) {
             if (pan.moved) {
-              suppressNextClickRef.current = true;
+              scheduleClickSuppressionClear();
             }
             panStateRef.current = null;
             setIsPanning(false);
@@ -362,11 +365,11 @@ export function CanvasViewport({
             }
 
             if (wasMoved && target) {
-              suppressNextClickRef.current = true;
+              scheduleClickSuppressionClear();
               onMoveOrSwap(from, target);
               onSelectCoord(target);
             } else {
-              suppressNextClickRef.current = true;
+              scheduleClickSuppressionClear();
               onSelectCoord(from);
             }
           }
@@ -445,8 +448,7 @@ export function CanvasViewport({
         <div className="absolute inset-x-0 bottom-4 flex justify-center pointer-events-none">
           <div className="pointer-events-auto flex items-center gap-1.5 rounded-xl border border-[#2e2a26] bg-[#161412]/95 px-3 py-1.5 text-xs shadow-xl backdrop-blur">
             <span className="mr-1 font-mono font-semibold text-amber-300">
-              {activeTargetTileset?.shortCode ?? activeTarget.tilesetId} #
-              {String(activeTarget.faceNumber).padStart(2, '0')}
+              {activeTargetLabel}
             </span>
             <span className="mr-1.5 rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-300">
               {activeTarget.rotation * 60}°

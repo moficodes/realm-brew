@@ -14,7 +14,15 @@ import {
   formatAssemblyLabel,
   resolvePlacementAsset,
 } from '../domain/plannerEngine';
-import type { AxialCoord, BrushSelection, Placement, PlacementKey, RotationStep, Tileset } from '../domain/types';
+import {
+  padFaceNumber,
+  type AxialCoord,
+  type BrushSelection,
+  type Placement,
+  type PlacementKey,
+  type RotationStep,
+  type Tileset,
+} from '../domain/types';
 
 export const MAP_CANVAS_BG = '#221f1c';
 
@@ -134,7 +142,7 @@ function drawMissingPlaceholderHex(
   ctx.stroke();
   ctx.setLineDash([]);
 
-  const paddedFace = String(faceNumber).padStart(2, '0');
+  const paddedFace = padFaceNumber(faceNumber);
   const shortLabel = tilesetLabel.length > 14 ? `${tilesetLabel.slice(0, 13)}…` : tilesetLabel;
 
   ctx.fillStyle = '#fbbf24';

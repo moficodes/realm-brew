@@ -27,8 +27,8 @@ import {
 import {
   clearMap,
   commitHistory,
+  computeCollectionUsage,
   computePullList,
-  computeStock,
   createHistory,
   findPlacementAt,
   flipBrush,
@@ -52,25 +52,7 @@ import type {
   Placement,
   Tileset,
 } from './domain/types';
-
-function isInputFocused(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.tagName === 'INPUT' ||
-    target.tagName === 'TEXTAREA' ||
-    target.tagName === 'SELECT' ||
-    target.isContentEditable
-  );
-}
-
-function slugifyFilename(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'realm-brew-map'
-  );
-}
+import { downloadBlob, isEditableTarget, slugifyFilename } from './utils/browserHelpers';
 
 export function App() {
   const [tilesets, setTilesets] = useState<Tileset[]>([]);
@@ -102,6 +84,14 @@ export function App() {
   const [deleteMapConfirmOpen, setDeleteMapConfirmOpen] = useState(false);
 
   const placements = history.present;
+
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const activeMapRef = useRef(activeMap);
+  activeMapRef.current = activeMap;
+  const collectionRef = useRef(collection);
+  collectionRef.current = collection;
+  const collectionSaveSeqRef = useRef(0);
 
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<{ id: string; name: string; placements: Placement[] } | null>(null);
@@ -165,10 +155,10 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     Promise.all([fetchTilesets(), fetchCollection(), fetchMaps()])
-      .then(async ([catalog, col, mapList]) => {
+      .then(async ([tilesetList, col, mapList]) => {
         if (cancelled) return;
-        setTilesets(catalog.tilesets);
-        setBundleError(catalog.bundleConfigured ? undefined : catalog.error);
+        setTilesets(tilesetList.tilesets);
+        setBundleError(tilesetList.bundleConfigured ? undefined : tilesetList.error);
         setCollection(col);
 
         if (mapList.length === 0) {
@@ -196,7 +186,7 @@ export function App() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setBundleError(err instanceof Error ? err.message : 'Unable to load workspace');
+        setAppBannerError(err instanceof Error ? err.message : 'Unable to load workspace');
       });
 
     return () => {
@@ -215,8 +205,8 @@ export function App() {
     return map;
   }, [tilesets]);
 
-  const stock = useMemo(
-    () => computeStock(placements, tilesets, collection),
+  const collectionUsage = useMemo(
+    () => computeCollectionUsage(placements, tilesets, collection),
     [placements, tilesets, collection],
   );
 
@@ -227,28 +217,36 @@ export function App() {
 
   const commitPlacements = useCallback(
     (updater: (current: Placement[]) => Placement[]) => {
-      setHistory((prev) => {
-        const nextPlacements = updater(prev.present);
-        if (activeMap) {
-          scheduleAutoSave(activeMap.id, activeMap.name, nextPlacements);
-        }
-        return commitHistory(prev, nextPlacements);
-      });
+      const nextPlacements = updater(historyRef.current.present);
+      const nextHistory = commitHistory(historyRef.current, nextPlacements);
+      historyRef.current = nextHistory;
+      setHistory(nextHistory);
+
+      const currentMap = activeMapRef.current;
+      if (currentMap) {
+        scheduleAutoSave(currentMap.id, currentMap.name, nextPlacements);
+      }
     },
-    [activeMap, scheduleAutoSave],
+    [scheduleAutoSave],
   );
 
-  const loadMapIntoEditor = useCallback((doc: MapDocument) => {
-    setActiveMap(doc);
-    setHistory(createHistory(doc.placements));
-    setSelectedCoord(null);
-    setSaveStatus('saved');
-    setCamera(
-      doc.placements.length > 0
-        ? computeFitCamera(doc.placements, viewportSize.width, viewportSize.height, 56)
-        : DEFAULT_CAMERA,
-    );
-  }, [viewportSize.height, viewportSize.width]);
+  const loadMapIntoEditor = useCallback(
+    (doc: MapDocument) => {
+      const nextHistory = createHistory(doc.placements);
+      historyRef.current = nextHistory;
+      activeMapRef.current = doc;
+      setActiveMap(doc);
+      setHistory(nextHistory);
+      setSelectedCoord(null);
+      setSaveStatus('saved');
+      setCamera(
+        doc.placements.length > 0
+          ? computeFitCamera(doc.placements, viewportSize.width, viewportSize.height, 56)
+          : DEFAULT_CAMERA,
+      );
+    },
+    [viewportSize.height, viewportSize.width],
+  );
 
   const handleSelectMap = useCallback(
     async (id: string) => {
@@ -286,25 +284,28 @@ export function App() {
 
   const handleRenameMap = useCallback(
     async (nextName: string) => {
-      if (!activeMap) return;
-      const updatedLocal: MapDocument = { ...activeMap, name: nextName };
+      const currentMap = activeMapRef.current;
+      if (!currentMap) return;
+      const updatedLocal: MapDocument = { ...currentMap, name: nextName };
+      activeMapRef.current = updatedLocal;
       setActiveMap(updatedLocal);
-      setMaps((prev) => prev.map((m) => (m.id === activeMap.id ? { ...m, name: nextName } : m)));
-      scheduleAutoSave(activeMap.id, nextName, placements);
+      setMaps((prev) => prev.map((m) => (m.id === currentMap.id ? { ...m, name: nextName } : m)));
+      scheduleAutoSave(currentMap.id, nextName, historyRef.current.present);
     },
-    [activeMap, placements, scheduleAutoSave],
+    [scheduleAutoSave],
   );
 
   const handleConfirmDeleteMap = useCallback(async () => {
     setDeleteMapConfirmOpen(false);
-    if (!activeMap) return;
+    const currentMap = activeMapRef.current;
+    if (!currentMap) return;
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
     pendingSaveRef.current = null;
 
-    const deletedId = activeMap.id;
+    const deletedId = currentMap.id;
     try {
       await deleteMap(deletedId);
       const remaining = maps.filter((m) => m.id !== deletedId);
@@ -327,27 +328,23 @@ export function App() {
     } catch (err) {
       setAppBannerError(err instanceof Error ? err.message : 'Failed to delete Map');
     }
-  }, [activeMap, loadMapIntoEditor, maps]);
+  }, [loadMapIntoEditor, maps]);
 
   const handleExportJson = useCallback(async () => {
-    if (!activeMap) return;
+    const currentMap = activeMapRef.current;
+    if (!currentMap) return;
     await flushPendingSave();
     const doc: MapDocument = {
       version: 1,
-      id: activeMap.id,
-      name: activeMap.name,
-      createdAt: activeMap.createdAt,
+      id: currentMap.id,
+      name: currentMap.name,
+      createdAt: currentMap.createdAt,
       updatedAt: new Date().toISOString(),
-      placements,
+      placements: historyRef.current.present,
     };
     const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${slugifyFilename(activeMap.name)}.realm-brew.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [activeMap, flushPendingSave, placements]);
+    downloadBlob(blob, `${slugifyFilename(currentMap.name)}.realm-brew.json`);
+  }, [flushPendingSave]);
 
   const handleImportJsonFile = useCallback(
     async (file: File) => {
@@ -400,6 +397,7 @@ export function App() {
         }),
       );
       if (brushOverride) {
+        setActiveBrush(null);
         setSelectedCoord(coord);
       }
     },
@@ -427,18 +425,21 @@ export function App() {
       return;
     }
     if (selectedCoord) {
-      setHistory((prev) => {
-        const next = flipPlacement(prev.present, selectedCoord, tilesets);
-        const beforeFace = findPlacementAt(prev.present, selectedCoord)?.faceNumber;
-        const afterFace = findPlacementAt(next, selectedCoord)?.faceNumber;
-        if (beforeFace === afterFace) return prev;
-        if (activeMap) {
-          scheduleAutoSave(activeMap.id, activeMap.name, next);
-        }
-        return commitHistory(prev, next);
-      });
+      const current = historyRef.current.present;
+      const next = flipPlacement(current, selectedCoord, tilesets);
+      const beforeFace = findPlacementAt(current, selectedCoord)?.faceNumber;
+      const afterFace = findPlacementAt(next, selectedCoord)?.faceNumber;
+      if (beforeFace === afterFace) return;
+
+      const nextHistory = commitHistory(historyRef.current, next);
+      historyRef.current = nextHistory;
+      setHistory(nextHistory);
+      const currentMap = activeMapRef.current;
+      if (currentMap) {
+        scheduleAutoSave(currentMap.id, currentMap.name, next);
+      }
     }
-  }, [activeBrush, activeMap, scheduleAutoSave, selectedCoord, tilesets]);
+  }, [activeBrush, scheduleAutoSave, selectedCoord, tilesets]);
 
   const handleMoveOrSwap = useCallback(
     (from: AxialCoord, to: AxialCoord) => {
@@ -457,36 +458,40 @@ export function App() {
   );
 
   const handleUndo = useCallback(() => {
-    setHistory((prev) => {
-      const next = undoHistory(prev);
-      if (activeMap && next.present !== prev.present) {
-        scheduleAutoSave(activeMap.id, activeMap.name, next.present);
-      }
-      return next;
-    });
+    const prevHistory = historyRef.current;
+    const nextHistory = undoHistory(prevHistory);
+    if (nextHistory === prevHistory) return;
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
     setSelectedCoord(null);
-  }, [activeMap, scheduleAutoSave]);
+    const currentMap = activeMapRef.current;
+    if (currentMap) {
+      scheduleAutoSave(currentMap.id, currentMap.name, nextHistory.present);
+    }
+  }, [scheduleAutoSave]);
 
   const handleRedo = useCallback(() => {
-    setHistory((prev) => {
-      const next = redoHistory(prev);
-      if (activeMap && next.present !== prev.present) {
-        scheduleAutoSave(activeMap.id, activeMap.name, next.present);
-      }
-      return next;
-    });
+    const prevHistory = historyRef.current;
+    const nextHistory = redoHistory(prevHistory);
+    if (nextHistory === prevHistory) return;
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
     setSelectedCoord(null);
-  }, [activeMap, scheduleAutoSave]);
+    const currentMap = activeMapRef.current;
+    if (currentMap) {
+      scheduleAutoSave(currentMap.id, currentMap.name, nextHistory.present);
+    }
+  }, [scheduleAutoSave]);
 
   const handleConfirmClearMap = useCallback(() => {
-    commitPlacements((prev) => clearMap(prev));
+    commitPlacements(() => clearMap());
     setSelectedCoord(null);
     setClearConfirmOpen(false);
   }, [commitPlacements]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (document.querySelector('dialog[open]') || isInputFocused(event.target)) {
+      if (document.querySelector('dialog[open]') || isEditableTarget(event.target)) {
         return;
       }
 
@@ -503,12 +508,6 @@ export function App() {
         } else {
           handleUndo();
         }
-        return;
-      }
-
-      if (event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'y') {
-        event.preventDefault();
-        handleRedo();
         return;
       }
 
@@ -535,11 +534,22 @@ export function App() {
   }, [handleFlipAction, handleRedo, handleRemoveAt, handleRotateAction, handleUndo, selectedCoord]);
 
   const handleChangeCopies = (tilesetId: string, copies: number) => {
-    const next: Collection = { ...collection, [tilesetId]: copies };
+    const next: Collection = { ...collectionRef.current, [tilesetId]: copies };
+    collectionRef.current = next;
     setCollection(next);
-    void saveCollection(next).then((persisted) => {
-      setCollection(persisted);
-    });
+    const seq = ++collectionSaveSeqRef.current;
+    void saveCollection(next)
+      .then((persisted) => {
+        if (seq === collectionSaveSeqRef.current) {
+          collectionRef.current = persisted;
+          setCollection(persisted);
+        }
+      })
+      .catch((err) => {
+        if (seq === collectionSaveSeqRef.current) {
+          setAppBannerError(err instanceof Error ? err.message : 'Failed to save Collection');
+        }
+      });
   };
 
   const handleViewportSizeChange = useCallback((nextSize: { width: number; height: number }) => {
@@ -578,7 +588,7 @@ export function App() {
         onClearBrush={() => setActiveBrush(null)}
         tilesetsById={tilesetsById}
         placementCount={placements.length}
-        overBudgetCount={stock.overBudgetCoords.size}
+        overBudgetCount={collectionUsage.overBudgetCoords.size}
         canUndo={history.past.length > 0}
         canRedo={history.future.length > 0}
         onUndo={handleUndo}
@@ -612,7 +622,7 @@ export function App() {
           onSelectTileset={setSelectedTilesetId}
           inStockOnly={inStockOnly}
           onToggleInStockOnly={() => setInStockOnly((v) => !v)}
-          stockByTileKey={stock.byTileKey}
+          availabilityByTileKey={collectionUsage.byTileKey}
           activeBrush={activeBrush}
           onSelectBrush={handleSelectBrush}
           onDragFaceStart={setDraggingBrush}
@@ -628,7 +638,7 @@ export function App() {
           activeBrush={activeBrush}
           draggingBrush={draggingBrush}
           selectedCoord={selectedCoord}
-          overBudgetCoords={stock.overBudgetCoords}
+          overBudgetCoords={collectionUsage.overBudgetCoords}
           showGrid={showGrid}
           showLabels={showLabels}
           camera={camera}
@@ -671,7 +681,6 @@ export function App() {
             mapName: activeMap?.name ?? 'Untitled Map',
             placements,
             tilesetsById,
-            overBudgetCoords: stock.overBudgetCoords,
             background,
             includeLabels,
           });

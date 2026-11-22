@@ -1,20 +1,22 @@
 import { axialKey } from './hexGeometry';
-import type {
-  AxialCoord,
-  BrushSelection,
-  Collection,
-  MapDocument,
-  Placement,
-  PlacementKey,
-  RotationStep,
-  Tile,
-  TileFace,
-  Tileset,
+import {
+  DEFAULT_TILESET_COPIES,
+  padFaceNumber,
+  type AxialCoord,
+  type BrushSelection,
+  type Collection,
+  type MapDocument,
+  type Placement,
+  type PlacementKey,
+  type RotationStep,
+  type Tile,
+  type TileFace,
+  type Tileset,
 } from './types';
 
-export const DEFAULT_TILESET_COPIES = 2;
+export { DEFAULT_TILESET_COPIES };
 
-export interface TileStockEntry {
+export interface TileAvailability {
   tilesetId: string;
   tileId: string;
   owned: number;
@@ -23,8 +25,8 @@ export interface TileStockEntry {
   isOverBudget: boolean;
 }
 
-export interface StockSummary {
-  byTileKey: Map<string, TileStockEntry>;
+export interface CollectionUsage {
+  byTileKey: Map<string, TileAvailability>;
   overBudgetCoords: Set<PlacementKey>;
 }
 
@@ -34,7 +36,7 @@ export interface HistoryState<T> {
   future: T[];
 }
 
-export function tileStockKey(tilesetId: string, tileId: string): string {
+export function tileCollectionKey(tilesetId: string, tileId: string): string {
   return `${tilesetId}:${tileId}`;
 }
 
@@ -80,6 +82,21 @@ function resolveFlippedFaceNumber(
   if (faceNumber === tile.faceA.faceNumber) return tile.faceB.faceNumber;
   if (faceNumber === tile.faceB.faceNumber) return tile.faceA.faceNumber;
   return faceNumber;
+}
+
+export function canFlipTarget(
+  target: Pick<Placement, 'tilesetId' | 'tileId' | 'faceNumber'>,
+  tilesetsById: ReadonlyMap<string, Tileset>,
+): boolean {
+  const tileset = tilesetsById.get(target.tilesetId);
+  if (!tileset) return false;
+  const tile = tileset.tiles.find(
+    (t) =>
+      t.tileId === target.tileId ||
+      t.faceA.faceNumber === target.faceNumber ||
+      t.faceB.faceNumber === target.faceNumber,
+  );
+  return Boolean(tile && !tile.isSymmetric);
 }
 
 export function flipBrush(brush: BrushSelection, tilesets: readonly Tileset[]): BrushSelection {
@@ -134,7 +151,7 @@ export function removePlacement(
   return placements.filter((p) => !(p.q === coord.q && p.r === coord.r));
 }
 
-export function clearMap(_placements?: readonly Placement[]): Placement[] {
+export function clearMap(): Placement[] {
   return [];
 }
 
@@ -170,23 +187,31 @@ export function redoHistory<T>(history: HistoryState<T>): HistoryState<T> {
   };
 }
 
-export function computeStock(
+export function computeCollectionUsage(
   placements: readonly Placement[],
   tilesets: readonly Tileset[],
   collection: Collection,
-): StockSummary {
+): CollectionUsage {
+  const tilesetsById = new Map<string, Tileset>(tilesets.map((t) => [t.id, t]));
   const usedCounts = new Map<string, number>();
+  const resolvedPlacements = new Map<PlacementKey, string>();
+
   for (const p of placements) {
-    const key = tileStockKey(p.tilesetId, p.tileId);
+    const resolved = resolvePlacementAsset(p, tilesetsById);
+    if (resolved.status !== 'ok') {
+      continue;
+    }
+    const key = tileCollectionKey(p.tilesetId, resolved.tile.tileId);
     usedCounts.set(key, (usedCounts.get(key) ?? 0) + 1);
+    resolvedPlacements.set(axialKey(p.q, p.r), key);
   }
 
-  const byTileKey = new Map<string, TileStockEntry>();
+  const byTileKey = new Map<string, TileAvailability>();
 
   for (const tileset of tilesets) {
     const owned = collection[tileset.id] ?? DEFAULT_TILESET_COPIES;
     for (const tile of tileset.tiles) {
-      const key = tileStockKey(tileset.id, tile.tileId);
+      const key = tileCollectionKey(tileset.id, tile.tileId);
       const used = usedCounts.get(key) ?? 0;
       const remaining = owned - used;
       byTileKey.set(key, {
@@ -200,28 +225,11 @@ export function computeStock(
     }
   }
 
-  for (const p of placements) {
-    const key = tileStockKey(p.tilesetId, p.tileId);
-    if (!byTileKey.has(key)) {
-      const owned = collection[p.tilesetId] ?? 0;
-      const used = usedCounts.get(key) ?? 0;
-      const remaining = owned - used;
-      byTileKey.set(key, {
-        tilesetId: p.tilesetId,
-        tileId: p.tileId,
-        owned,
-        used,
-        remaining,
-        isOverBudget: remaining < 0,
-      });
-    }
-  }
-
   const overBudgetCoords = new Set<PlacementKey>();
-  for (const p of placements) {
-    const entry = byTileKey.get(tileStockKey(p.tilesetId, p.tileId));
+  for (const [coordKey, key] of resolvedPlacements.entries()) {
+    const entry = byTileKey.get(key);
     if (entry?.isOverBudget) {
-      overBudgetCoords.add(axialKey(p.q, p.r));
+      overBudgetCoords.add(coordKey);
     }
   }
 
@@ -231,6 +239,8 @@ export function computeStock(
 export function validatePlacements(input: unknown): Placement[] | null {
   if (!Array.isArray(input)) return null;
   const result: Placement[] = [];
+  const seenCoords = new Set<PlacementKey>();
+
   for (const item of input) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
     const raw = item as Record<string, unknown>;
@@ -253,9 +263,18 @@ export function validatePlacements(input: unknown): Placement[] | null {
     ) {
       return null;
     }
+
+    const q = raw.q === 0 ? 0 : raw.q;
+    const r = raw.r === 0 ? 0 : raw.r;
+    const coordKey = axialKey(q, r);
+    if (seenCoords.has(coordKey)) {
+      return null;
+    }
+    seenCoords.add(coordKey);
+
     result.push({
-      q: raw.q === 0 ? 0 : raw.q,
-      r: raw.r === 0 ? 0 : raw.r,
+      q,
+      r,
       tilesetId: raw.tilesetId,
       tileId: raw.tileId,
       faceNumber: raw.faceNumber,
@@ -291,7 +310,7 @@ export function validateAndParseMapJson(raw: string): MapJsonParseResult {
 
   const placements = validatePlacements(obj.placements);
   if (!placements) {
-    return { ok: false, error: 'Map JSON contains invalid Placements.' };
+    return { ok: false, error: 'Map JSON contains invalid or duplicate Placements.' };
   }
 
   const now = new Date().toISOString();
@@ -404,7 +423,7 @@ export function formatAssemblyLabel(
   placement: Pick<Placement, 'tilesetId' | 'faceNumber'>,
   tilesetsById: ReadonlyMap<string, Tileset>,
 ): string {
-  const padded = String(placement.faceNumber).padStart(2, '0');
+  const padded = padFaceNumber(placement.faceNumber);
   const tileset = tilesetsById.get(placement.tilesetId);
   if (!tileset) {
     return `?${placement.tilesetId} #${padded}`;
@@ -433,14 +452,14 @@ export function computePullList(
           tilesetId: p.tilesetId,
           tileId: p.tileId,
           faceNumber: p.faceNumber,
-          label: String(p.faceNumber).padStart(2, '0'),
+          label: padFaceNumber(p.faceNumber),
           count: 1,
         });
       }
       continue;
     }
 
-    const key = tileStockKey(p.tilesetId, resolved.tile.tileId);
+    const key = tileCollectionKey(p.tilesetId, resolved.tile.tileId);
     let faceMap = tileFaceCounts.get(key);
     if (!faceMap) {
       faceMap = new Map<number, number>();
@@ -456,7 +475,7 @@ export function computePullList(
     let totalNeeded = 0;
 
     for (const tile of tileset.tiles) {
-      const faceMap = tileFaceCounts.get(tileStockKey(tileset.id, tile.tileId));
+      const faceMap = tileFaceCounts.get(tileCollectionKey(tileset.id, tile.tileId));
       if (!faceMap) continue;
 
       const faces: PullListFaceUsage[] = [];
@@ -512,7 +531,7 @@ export function formatPullListText(mapName: string, pullList: PullListSummary): 
 
   for (const group of pullList.groups) {
     lines.push('');
-    lines.push(`${group.tilesetName} (${group.shortCode}) — ${group.totalNeeded} tiles (own ${group.owned} sets)`);
+    lines.push(`${group.tilesetName} (${group.shortCode}) — ${group.totalNeeded} tiles (${group.owned} owned copies)`);
     for (const item of group.items) {
       const faceDetails = item.faces.map((f) => `#${f.label} x${f.count}`).join(', ');
       const warn = item.isOverBudget ? ` [OVER BUDGET: own ${item.owned}]` : '';

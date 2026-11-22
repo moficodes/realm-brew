@@ -2,9 +2,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { validatePlacements } from '../domain/plannerEngine';
-import type { Collection, MapDocument, MapSummary, Placement } from '../domain/types';
+import {
+  DEFAULT_TILESET_COPIES,
+  type Collection,
+  type MapDocument,
+  type MapSummary,
+  type Placement,
+} from '../domain/types';
 
-export const DEFAULT_OWNED_COPIES = 2;
 const SAFE_MAP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 export function isSafeMapId(id: string): boolean {
@@ -56,7 +61,7 @@ export function readCollection(dataDir: string, discoveredTilesetIds: readonly s
   const merged: Collection = { ...stored };
   for (const id of discoveredTilesetIds) {
     if (!(id in merged)) {
-      merged[id] = DEFAULT_OWNED_COPIES;
+      merged[id] = DEFAULT_TILESET_COPIES;
     }
   }
   return merged;
@@ -116,7 +121,12 @@ export function readMap(dataDir: string, id: string): MapDocument | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<MapDocument>;
     const placements = validatePlacements(parsed.placements);
-    if (!placements || typeof parsed.name !== 'string' || typeof parsed.id !== 'string') {
+    if (
+      parsed.version !== 1 ||
+      !placements ||
+      typeof parsed.name !== 'string' ||
+      typeof parsed.id !== 'string'
+    ) {
       return null;
     }
     return {

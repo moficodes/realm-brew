@@ -1,5 +1,5 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, Layers } from 'lucide-react';
-import { tileStockKey, type TileStockEntry } from '../domain/plannerEngine';
+import { tileCollectionKey, type TileAvailability } from '../domain/plannerEngine';
 import type { BrushSelection, TileFace, Tileset } from '../domain/types';
 
 interface TilePaletteProps {
@@ -8,7 +8,7 @@ interface TilePaletteProps {
   onSelectTileset: (tilesetId: string | 'all') => void;
   inStockOnly: boolean;
   onToggleInStockOnly: () => void;
-  stockByTileKey: ReadonlyMap<string, TileStockEntry>;
+  availabilityByTileKey: ReadonlyMap<string, TileAvailability>;
   activeBrush: BrushSelection | null;
   onSelectBrush: (brush: BrushSelection | null) => void;
   onDragFaceStart: (brush: BrushSelection) => void;
@@ -18,13 +18,69 @@ interface TilePaletteProps {
   bundleError?: string;
 }
 
+interface TileFaceButtonProps {
+  tileset: Tileset;
+  tileId: string;
+  face: TileFace;
+  isActive: boolean;
+  defaultRotation: BrushSelection['rotation'];
+  onClick: () => void;
+  onDragStart: (brush: BrushSelection) => void;
+  onDragEnd: () => void;
+}
+
+function TileFaceButton({
+  tileset,
+  tileId,
+  face,
+  isActive,
+  defaultRotation,
+  onClick,
+  onDragStart,
+  onDragEnd,
+}: TileFaceButtonProps) {
+  return (
+    <button
+      type="button"
+      draggable
+      onDragStart={(e) => {
+        const payload: BrushSelection = {
+          tilesetId: tileset.id,
+          tileId,
+          faceNumber: face.faceNumber,
+          rotation: defaultRotation,
+        };
+        e.dataTransfer.setData('application/x-realm-brew-face', JSON.stringify(payload));
+        e.dataTransfer.effectAllowed = 'copy';
+        onDragStart(payload);
+      }}
+      onDragEnd={onDragEnd}
+      onClick={onClick}
+      className={`group relative flex cursor-grab flex-col items-center rounded-md border p-1.5 transition active:cursor-grabbing ${
+        isActive
+          ? 'border-amber-400 bg-amber-500/15 ring-1 ring-amber-400/50'
+          : 'border-[#2e2a26] bg-[#221f1c] hover:border-stone-500'
+      }`}
+    >
+      <img
+        src={face.url}
+        alt={`${tileset.name} Tile Face #${face.label}`}
+        loading="lazy"
+        draggable={false}
+        className="h-20 w-full object-contain"
+      />
+      <span className="mt-1 font-mono text-[11px] text-stone-300">#{face.label}</span>
+    </button>
+  );
+}
+
 export function TilePalette({
   tilesets,
   selectedTilesetId,
   onSelectTileset,
   inStockOnly,
   onToggleInStockOnly,
-  stockByTileKey,
+  availabilityByTileKey,
   activeBrush,
   onSelectBrush,
   onDragFaceStart,
@@ -64,8 +120,8 @@ export function TilePalette({
     .map((ts) => {
       const filteredTiles = inStockOnly
         ? ts.tiles.filter((tile) => {
-            const stock = stockByTileKey.get(tileStockKey(ts.id, tile.tileId));
-            return (stock?.remaining ?? 0) > 0;
+            const avail = availabilityByTileKey.get(tileCollectionKey(ts.id, tile.tileId));
+            return (avail?.remaining ?? 0) > 0;
           })
         : ts.tiles;
       return { tileset: ts, tiles: filteredTiles };
@@ -90,24 +146,6 @@ export function TilePalette({
       rotation: activeBrush?.rotation ?? 0,
     });
   };
-
-  const makeDragProps = (tilesetId: string, tileId: string, face: TileFace) => ({
-    draggable: true,
-    onDragStart: (e: React.DragEvent<HTMLButtonElement>) => {
-      const payload: BrushSelection = {
-        tilesetId,
-        tileId,
-        faceNumber: face.faceNumber,
-        rotation: activeBrush?.rotation ?? 0,
-      };
-      e.dataTransfer.setData('application/x-realm-brew-face', JSON.stringify(payload));
-      e.dataTransfer.effectAllowed = 'copy';
-      onDragFaceStart(payload);
-    },
-    onDragEnd: () => {
-      onDragFaceEnd();
-    },
-  });
 
   return (
     <aside className="flex h-full w-80 shrink-0 flex-col border-r border-[#2e2a26] bg-[#161412]">
@@ -182,7 +220,7 @@ export function TilePalette({
 
         {!bundleError && visibleSections.length === 0 && (
           <div className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-4 text-center text-xs text-stone-400">
-            {inStockOnly ? 'No in-stock Tiles remaining in this filter.' : 'No Tilesets found.'}
+            {inStockOnly ? 'No available Tiles remaining in this filter.' : 'No Tilesets found.'}
           </div>
         )}
 
@@ -198,8 +236,8 @@ export function TilePalette({
 
               <div className="grid grid-cols-1 gap-2">
                 {tiles.map((tile) => {
-                  const stock = stockByTileKey.get(tileStockKey(tileset.id, tile.tileId));
-                  const remaining = stock?.remaining ?? 0;
+                  const avail = availabilityByTileKey.get(tileCollectionKey(tileset.id, tile.tileId));
+                  const remaining = avail?.remaining ?? 0;
                   const isDepletedOrOver = remaining <= 0;
                   const isOver = remaining < 0;
 
@@ -212,6 +250,8 @@ export function TilePalette({
                     activeBrush?.tilesetId === tileset.id &&
                     activeBrush.tileId === tile.tileId &&
                     activeBrush.faceNumber === tile.faceB.faceNumber;
+
+                  const defaultRotation = activeBrush?.rotation ?? 0;
 
                   return (
                     <div
@@ -250,50 +290,27 @@ export function TilePalette({
                       </div>
 
                       <div className={`grid gap-2 ${tile.isSymmetric ? 'grid-cols-1' : 'grid-cols-2'}`}>
-                        <button
-                          type="button"
-                          {...makeDragProps(tileset.id, tile.tileId, tile.faceA)}
+                        <TileFaceButton
+                          tileset={tileset}
+                          tileId={tile.tileId}
+                          face={tile.faceA}
+                          isActive={isFaceAActive}
+                          defaultRotation={defaultRotation}
                           onClick={() => handleFaceClick(tileset.id, tile.tileId, tile.faceA)}
-                          className={`group relative flex cursor-grab flex-col items-center rounded-md border p-1.5 transition active:cursor-grabbing ${
-                            isFaceAActive
-                              ? 'border-amber-400 bg-amber-500/15 ring-1 ring-amber-400/50'
-                              : 'border-[#2e2a26] bg-[#221f1c] hover:border-stone-500'
-                          }`}
-                        >
-                          <img
-                            src={tile.faceA.url}
-                            alt={`${tileset.name} Face #${tile.faceA.label}`}
-                            loading="lazy"
-                            draggable={false}
-                            className="h-20 w-full object-contain"
-                          />
-                          <span className="mt-1 font-mono text-[11px] text-stone-300">
-                            #{tile.faceA.label}
-                          </span>
-                        </button>
-
+                          onDragStart={onDragFaceStart}
+                          onDragEnd={onDragFaceEnd}
+                        />
                         {!tile.isSymmetric && (
-                          <button
-                            type="button"
-                            {...makeDragProps(tileset.id, tile.tileId, tile.faceB)}
+                          <TileFaceButton
+                            tileset={tileset}
+                            tileId={tile.tileId}
+                            face={tile.faceB}
+                            isActive={isFaceBActive}
+                            defaultRotation={defaultRotation}
                             onClick={() => handleFaceClick(tileset.id, tile.tileId, tile.faceB)}
-                            className={`group relative flex cursor-grab flex-col items-center rounded-md border p-1.5 transition active:cursor-grabbing ${
-                              isFaceBActive
-                                ? 'border-amber-400 bg-amber-500/15 ring-1 ring-amber-400/50'
-                                : 'border-[#2e2a26] bg-[#221f1c] hover:border-stone-500'
-                            }`}
-                          >
-                            <img
-                              src={tile.faceB.url}
-                              alt={`${tileset.name} Face #${tile.faceB.label}`}
-                              loading="lazy"
-                              draggable={false}
-                              className="h-20 w-full object-contain"
-                            />
-                            <span className="mt-1 font-mono text-[11px] text-stone-300">
-                              #{tile.faceB.label}
-                            </span>
-                          </button>
+                            onDragStart={onDragFaceStart}
+                            onDragEnd={onDragFaceEnd}
+                          />
                         )}
                       </div>
                     </div>

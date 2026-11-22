@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { validatePlacements } from '../domain/plannerEngine';
-import type { TilesetCatalogResponse } from '../domain/types';
+import type { TilesetListResponse } from '../domain/types';
 import { discoverTilesets } from './bundleDiscovery';
 import {
   createMap,
@@ -74,7 +74,7 @@ async function handleApiRequest(
 
   if (method === 'GET' && pathname === '/api/tilesets') {
     const discovery = discoverTilesets(options.bundleDir);
-    const response: TilesetCatalogResponse = {
+    const response: TilesetListResponse = {
       tilesets: discovery.tilesets.map(({ id, name, shortCode, tiles }) => ({
         id,
         name,

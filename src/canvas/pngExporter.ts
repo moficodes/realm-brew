@@ -1,11 +1,11 @@
 import {
   HEX_RADIUS,
-  axialKey,
   axialToWorld,
   computeExportBounds,
 } from '../domain/hexGeometry';
 import { formatAssemblyLabel, resolvePlacementAsset } from '../domain/plannerEngine';
-import type { Placement, PlacementKey, Tileset } from '../domain/types';
+import type { Placement, Tileset } from '../domain/types';
+import { downloadBlob, slugifyFilename } from '../utils/browserHelpers';
 import {
   MAP_CANVAS_BG,
   drawAssemblyLabel,
@@ -19,21 +19,11 @@ export interface ExportPngOptions {
   mapName: string;
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
-  overBudgetCoords: ReadonlySet<PlacementKey>;
   background: ExportBackground;
   includeLabels: boolean;
 }
 
 const MAX_EXPORT_CANVAS_PX = 8192;
-
-function slugifyMapName(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'realm-brew-map'
-  );
-}
 
 function loadImage(url: string): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
@@ -49,7 +39,6 @@ export async function exportMapAsPng({
   mapName,
   placements,
   tilesetsById,
-  overBudgetCoords,
   background,
   includeLabels,
 }: ExportPngOptions): Promise<void> {
@@ -110,7 +99,7 @@ export async function exportMapAsPng({
         y,
         placement.rotation,
         formatAssemblyLabel(placement, tilesetsById),
-        overBudgetCoords.has(axialKey(placement.q, placement.r)),
+        false,
       );
     }
   }
@@ -122,10 +111,5 @@ export async function exportMapAsPng({
     }, 'image/png');
   });
 
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${slugifyMapName(mapName)}.png`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, `${slugifyFilename(mapName)}.png`);
 }

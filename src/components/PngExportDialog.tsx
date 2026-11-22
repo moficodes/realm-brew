@@ -82,8 +82,8 @@ export function PngExportDialog({
       <div className="space-y-4 px-5 py-4 text-xs">
         <p className="text-stone-400">
           Exports <span className="font-medium text-stone-200">{mapName}</span> ({placementCount}{' '}
-          {placementCount === 1 ? 'Placement' : 'Placements'}) tightly cropped around your placed
-          Tiles.
+          {placementCount === 1 ? 'Placement' : 'Placements'}) tightly cropped around your
+          Placements.
         </p>
 
         <fieldset className="space-y-2">

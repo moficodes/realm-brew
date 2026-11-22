@@ -9,16 +9,17 @@ interface PullListPanelProps {
 }
 
 export function PullListPanel({ mapName, pullList, onClose }: PullListPanelProps) {
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
 
   const handleCopy = async () => {
     const text = formatPullListText(mapName, pullList);
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
+      setCopyState('copied');
+      window.setTimeout(() => setCopyState('idle'), 1800);
     } catch {
-      // Clipboard API unavailable in non-secure context
+      setCopyState('error');
+      window.setTimeout(() => setCopyState('idle'), 2200);
     }
   };
 
@@ -41,11 +42,13 @@ export function PullListPanel({ mapName, pullList, onClose }: PullListPanelProps
             title="Copy Pull List summary"
             className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-xs text-stone-200 transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {copied ? (
+            {copyState === 'copied' ? (
               <>
                 <Check className="h-3.5 w-3.5 text-emerald-400" />
                 <span className="text-emerald-300">Copied</span>
               </>
+            ) : copyState === 'error' ? (
+              <span className="text-red-300">Unavailable</span>
             ) : (
               <>
                 <Copy className="h-3.5 w-3.5" />
@@ -82,7 +85,7 @@ export function PullListPanel({ mapName, pullList, onClose }: PullListPanelProps
                     <h3 className="text-xs font-semibold text-stone-200">{group.tilesetName}</h3>
                   </div>
                   <span className="text-[11px] text-stone-400">
-                    {group.totalNeeded} needed · own {group.owned}
+                    {group.totalNeeded} needed · {group.owned} owned
                   </span>
                 </div>
 

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Tile, TileFace, Tileset } from '../domain/types';
+import { padFaceNumber, type Tile, type TileFace, type Tileset } from '../domain/types';
 
 export interface DiscoveredTileset extends Tileset {
   dirPath: string;
@@ -13,8 +13,8 @@ export interface DiscoveryResult {
   error?: string;
 }
 
-const TILES_FOLDER_RE = /\btiles$/i;
-const OVERLAYS_FOLDER_RE = /\boverlays$/i;
+const TILES_FOLDER_RE = /tiles$/i;
+const OVERLAYS_FOLDER_RE = /overlays$/i;
 const PNG_FACE_RE = /_(\d+)\.png$/i;
 
 export function normalizeTilesetName(folderName: string): string {
@@ -49,18 +49,34 @@ function baseShortCode(name: string): string {
 
 function pairFaces(tilesetId: string, faces: TileFace[]): Tile[] {
   const tiles: Tile[] = [];
-  for (let i = 0; i < faces.length; i += 2) {
-    const faceA = faces[i];
-    const maybeFaceB = faces[i + 1];
-    const isSymmetric = !maybeFaceB;
-    const faceB = maybeFaceB ?? faceA;
-    tiles.push({
-      tileId: `${faceA.label}-${faceB.label}`,
-      tilesetId,
-      faceA,
-      faceB,
-      isSymmetric,
-    });
+  let index = 0;
+  while (index < faces.length) {
+    const faceA = faces[index];
+    const nextFace = faces[index + 1];
+    const isConsecutiveOddEven =
+      nextFace !== undefined &&
+      faceA.faceNumber % 2 === 1 &&
+      nextFace.faceNumber === faceA.faceNumber + 1;
+
+    if (isConsecutiveOddEven) {
+      tiles.push({
+        tileId: `${faceA.label}-${nextFace.label}`,
+        tilesetId,
+        faceA,
+        faceB: nextFace,
+        isSymmetric: false,
+      });
+      index += 2;
+    } else {
+      tiles.push({
+        tileId: `${faceA.label}-${faceA.label}`,
+        tilesetId,
+        faceA,
+        faceB: faceA,
+        isSymmetric: true,
+      });
+      index += 1;
+    }
   }
   return tiles;
 }
@@ -132,7 +148,7 @@ export function discoverTilesets(bundleDir: string | undefined): DiscoveryResult
 
     const faceFiles = new Map<string, string>();
     const faces: TileFace[] = pngEntries.map((png) => {
-      const label = String(png.faceNumber).padStart(2, '0');
+      const label = padFaceNumber(png.faceNumber);
       faceFiles.set(png.filename, path.join(item.dirPath, png.filename));
       return {
         faceNumber: png.faceNumber,

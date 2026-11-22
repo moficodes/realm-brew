@@ -14,6 +14,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import { formatAssemblyLabel } from '../domain/plannerEngine';
 import type { BrushSelection, MapSummary, Tileset } from '../domain/types';
 import { MapSwitcher } from './MapSwitcher';
 
@@ -88,10 +89,7 @@ export function Toolbar({
   onOpenCollection,
   onOpenPngExport,
 }: ToolbarProps) {
-  const activeTileset = activeBrush ? tilesetsById.get(activeBrush.tilesetId) : undefined;
-  const activeLabel = activeBrush
-    ? `${activeTileset?.shortCode ?? activeBrush.tilesetId} #${String(activeBrush.faceNumber).padStart(2, '0')}`
-    : null;
+  const activeLabel = activeBrush ? formatAssemblyLabel(activeBrush, tilesetsById) : null;
 
   return (
     <header className="flex h-12 shrink-0 items-center justify-between gap-2 overflow-x-auto border-b border-[#2e2a26] bg-[#161412] px-3">

@@ -1,3 +1,5 @@
+export const DEFAULT_TILESET_COPIES = 2;
+
 export type RotationStep = 0 | 1 | 2 | 3 | 4 | 5;
 
 export interface AxialCoord {
@@ -27,7 +29,7 @@ export interface Tileset {
   tiles: Tile[];
 }
 
-export interface TilesetCatalogResponse {
+export interface TilesetListResponse {
   tilesets: Tileset[];
   bundleConfigured: boolean;
   error?: string;
@@ -67,4 +69,8 @@ export interface BrushSelection {
   tileId: string;
   faceNumber: number;
   rotation: RotationStep;
+}
+
+export function padFaceNumber(faceNumber: number): string {
+  return String(faceNumber).padStart(2, '0');
 }

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canFlipTarget,
   clearMap,
   commitHistory,
+  computeCollectionUsage,
   computePullList,
-  computeStock,
   createHistory,
   flipBrush,
   flipPlacement,
@@ -52,7 +53,7 @@ function makeTestTileset(id: string, shortCode: string): Tileset {
   };
 }
 
-describe('Planner engine placement & inventory (Seam 2)', () => {
+describe('Planner engine Placement & Collection usage (Seam 2)', () => {
   it('places a new Placement at an empty hex coordinate', () => {
     const placements = placeTile([], {
       q: 1,
@@ -98,14 +99,14 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     });
   });
 
-  it('tracks shared physical Tile stock across Side A & Side B and soft-warns when exceeding Collection', () => {
+  it('tracks shared physical Tile availability across Side A & Side B and soft-warns when exceeding Collection', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
     const collection: Collection = { 'man-hewn-dungeons': 2 };
 
     let placements: Placement[] = [];
     placements = placeTile(placements, { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 });
-    let stock = computeStock(placements, [mhd], collection);
-    expect(stock.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
+    let usage = computeCollectionUsage(placements, [mhd], collection);
+    expect(usage.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
       owned: 2,
       used: 1,
       remaining: 1,
@@ -113,30 +114,30 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     });
 
     placements = placeTile(placements, { q: 1, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 });
-    stock = computeStock(placements, [mhd], collection);
-    expect(stock.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
+    usage = computeCollectionUsage(placements, [mhd], collection);
+    expect(usage.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
       owned: 2,
       used: 2,
       remaining: 0,
       isOverBudget: false,
     });
-    expect(stock.overBudgetCoords.size).toBe(0);
+    expect(usage.overBudgetCoords.size).toBe(0);
 
-    // 3rd placement uses Face 02 of the same physical Tile -> remaining becomes -1 & flags placements
+    // 3rd Placement uses Face 02 of the same physical Tile -> remaining becomes -1 & flags Placements
     placements = placeTile(placements, { q: 2, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 2, rotation: 0 });
-    stock = computeStock(placements, [mhd], collection);
-    expect(stock.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
+    usage = computeCollectionUsage(placements, [mhd], collection);
+    expect(usage.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
       owned: 2,
       used: 3,
       remaining: -1,
       isOverBudget: true,
     });
-    expect(stock.overBudgetCoords.has('0,0')).toBe(true);
-    expect(stock.overBudgetCoords.has('1,0')).toBe(true);
-    expect(stock.overBudgetCoords.has('2,0')).toBe(true);
+    expect(usage.overBudgetCoords.has('0,0')).toBe(true);
+    expect(usage.overBudgetCoords.has('1,0')).toBe(true);
+    expect(usage.overBudgetCoords.has('2,0')).toBe(true);
   });
 
-  it('restores old physical Tile stock on replace and isolates _37 per Tileset and 0-copy digital-only sets', () => {
+  it('restores old physical Tile availability on replace, isolates _37 per Tileset, and ignores missing assets in over-budget flags', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
     const sr = makeTestTileset('subterranean-rivers', 'SR');
     const collection: Collection = { 'man-hewn-dungeons': 2, 'subterranean-rivers': 0 };
@@ -144,28 +145,31 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     let placements: Placement[] = [
       { q: 0, r: 0, tilesetId: mhd.id, tileId: '37-37', faceNumber: 37, rotation: 0 },
       { q: 1, r: 0, tilesetId: sr.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
+      { q: 2, r: 0, tilesetId: 'missing-set', tileId: '01-02', faceNumber: 1, rotation: 0 },
     ];
-    let stock = computeStock(placements, [mhd, sr], collection);
+    let usage = computeCollectionUsage(placements, [mhd, sr], collection);
 
     // _37 is strictly isolated per Tileset
-    expect(stock.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(1);
-    expect(stock.byTileKey.get('subterranean-rivers:37-37')?.remaining).toBe(0);
+    expect(usage.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(1);
+    expect(usage.byTileKey.get('subterranean-rivers:37-37')?.remaining).toBe(0);
 
-    // 0-copy digital-only Tileset soft-warns on first placement
-    expect(stock.byTileKey.get('subterranean-rivers:01-02')).toMatchObject({
+    // 0-copy digital-only Tileset soft-warns on first Placement
+    expect(usage.byTileKey.get('subterranean-rivers:01-02')).toMatchObject({
       owned: 0,
       used: 1,
       remaining: -1,
       isOverBudget: true,
     });
-    expect(stock.overBudgetCoords.has('1,0')).toBe(true);
-    expect(stock.overBudgetCoords.has('0,0')).toBe(false);
+    expect(usage.overBudgetCoords.has('1,0')).toBe(true);
+    expect(usage.overBudgetCoords.has('0,0')).toBe(false);
+    // Missing-asset Placement is surfaced as placeholder, not falsely flagged over-budget
+    expect(usage.overBudgetCoords.has('2,0')).toBe(false);
 
     // Replacing (0,0) with 03-04 restores 37-37 back to 2
     placements = placeTile(placements, { q: 0, r: 0, tilesetId: mhd.id, tileId: '03-04', faceNumber: 3, rotation: 0 });
-    stock = computeStock(placements, [mhd, sr], collection);
-    expect(stock.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(2);
-    expect(stock.byTileKey.get('man-hewn-dungeons:03-04')?.remaining).toBe(1);
+    usage = computeCollectionUsage(placements, [mhd, sr], collection);
+    expect(usage.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(2);
+    expect(usage.byTileKey.get('man-hewn-dungeons:03-04')?.remaining).toBe(1);
   });
 
   it('rotates Placements and steps 60 degrees clockwise and counter-clockwise with wraparound', () => {
@@ -193,15 +197,18 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
 
     const flippedA = flipPlacement(initial, { q: 0, r: 0 }, [mhd]);
     expect(flippedA.find((p) => p.q === 0 && p.r === 0)?.faceNumber).toBe(2);
-    // Stock stays unchanged on flip
-    expect(computeStock(flippedA, [mhd], collection).byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
+    // Availability stays unchanged on flip
+    expect(computeCollectionUsage(flippedA, [mhd], collection).byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
 
     const flippedBack = flipPlacement(flippedA, { q: 0, r: 0 }, [mhd]);
     expect(flippedBack.find((p) => p.q === 0 && p.r === 0)?.faceNumber).toBe(1);
 
-    // Symmetric _37 stays unchanged
+    // Symmetric _37 stays unchanged and reports canFlipTarget=false
     const flippedDark = flipPlacement(flippedBack, { q: 1, r: 0 }, [mhd]);
     expect(flippedDark.find((p) => p.q === 1 && p.r === 0)?.faceNumber).toBe(37);
+    const byId = new Map([[mhd.id, mhd]]);
+    expect(canFlipTarget(initial[0], byId)).toBe(true);
+    expect(canFlipTarget(initial[1], byId)).toBe(false);
 
     // Brush flip works identically
     const brush: BrushSelection = { tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 3 };
@@ -229,7 +236,7 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     expect(removed).toHaveLength(1);
     expect(removed[0]).toMatchObject({ q: 2, r: -1, tileId: '03-04' });
 
-    expect(clearMap(swapped)).toEqual([]);
+    expect(clearMap()).toEqual([]);
   });
 
   it('tracks Undo/Redo history across place, edit, and Clear Map and discards redo branch on new edits', () => {
@@ -300,6 +307,20 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
         }),
       ),
     ).toMatchObject({ ok: false });
+
+    // Rejects duplicate (q, r) coordinates
+    expect(
+      validateAndParseMapJson(
+        JSON.stringify({
+          version: 1,
+          name: 'Duplicate Coord',
+          placements: [
+            { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 },
+            { q: -0, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 1 },
+          ],
+        }),
+      ),
+    ).toMatchObject({ ok: false });
   });
 
   it('evaluates Collection availability independently per active Map', () => {
@@ -314,10 +335,10 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
       { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
     ];
 
-    const stockA = computeStock(mapA, [mhd], collection);
-    const stockB = computeStock(mapB, [mhd], collection);
-    expect(stockA.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(0);
-    expect(stockB.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
+    const usageA = computeCollectionUsage(mapA, [mhd], collection);
+    const usageB = computeCollectionUsage(mapB, [mhd], collection);
+    expect(usageA.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(0);
+    expect(usageB.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
   });
 
   it('derives grouped Pull List with Face breakdowns, symmetric _37, over-budget flags, missing assets, and text export', () => {
