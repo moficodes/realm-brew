@@ -29,7 +29,7 @@ The user's physical inventory of owned Tilesets, recorded as a copy count per Ti
 _Avoid_: Inventory, library, stock, catalog
 
 **Overlay**:
-A free-form visual prop or feature (such as a bridge, wall, trap, or furniture) layered on top of a Map independently of the hex grid.
+A transparent visual prop or feature (such as a bridge, wall, trap, or furniture) placed on top of a host Tile Placement so it stays associated with that Tile for tabletop assembly.
 _Avoid_: Prop, decal, sticker, token
 
 **Pull List**:
