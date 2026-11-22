@@ -10,9 +10,11 @@ import {
   placeTile,
   redoHistory,
   removePlacement,
+  resolvePlacementAsset,
   rotatePlacement,
   rotateStep,
   undoHistory,
+  validateAndParseMapJson,
 } from '../src/domain/plannerEngine';
 import type { BrushSelection, Collection, Placement, Tileset } from '../src/domain/types';
 
@@ -256,5 +258,62 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     h = commitHistory(h, rotatePlacement(h.present, { q: 0, r: 0 }, 1));
     expect(h.future).toEqual([]);
     expect(h.present[0].rotation).toBe(1);
+  });
+
+  it('validates Map JSON while preserving missing-asset Placements and rejects malformed payloads', () => {
+    const valid = validateAndParseMapJson(
+      JSON.stringify({
+        version: 1,
+        id: 'imported-1',
+        name: 'Old Dungeon',
+        createdAt: '2026-11-01T00:00:00Z',
+        updatedAt: '2026-11-01T00:00:00Z',
+        placements: [
+          { q: 0, r: 0, tilesetId: 'man-hewn-dungeons', tileId: '01-02', faceNumber: 1, rotation: 0 },
+          { q: 1, r: 0, tilesetId: 'future-expansion', tileId: '05-06', faceNumber: 5, rotation: 3 },
+          { q: 2, r: 0, tilesetId: 'man-hewn-dungeons', tileId: '99-100', faceNumber: 99, rotation: 1 },
+        ],
+      }),
+    );
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.map.placements).toHaveLength(3);
+
+      const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+      const byId = new Map([[mhd.id, mhd]]);
+      expect(resolvePlacementAsset(valid.map.placements[0], byId).status).toBe('ok');
+      expect(resolvePlacementAsset(valid.map.placements[1], byId).status).toBe('missing-tileset');
+      expect(resolvePlacementAsset(valid.map.placements[2], byId).status).toBe('missing-face');
+    }
+
+    expect(validateAndParseMapJson('{not json')).toMatchObject({ ok: false });
+    expect(validateAndParseMapJson(JSON.stringify({ version: 99, placements: [] }))).toMatchObject({ ok: false });
+    expect(
+      validateAndParseMapJson(
+        JSON.stringify({
+          version: 1,
+          name: 'Bad Rot',
+          placements: [{ q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 7 }],
+        }),
+      ),
+    ).toMatchObject({ ok: false });
+  });
+
+  it('evaluates Collection availability independently per active Map', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const collection: Collection = { 'man-hewn-dungeons': 2 };
+
+    const mapA: Placement[] = [
+      { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
+      { q: 1, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 2, rotation: 0 },
+    ];
+    const mapB: Placement[] = [
+      { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
+    ];
+
+    const stockA = computeStock(mapA, [mhd], collection);
+    const stockB = computeStock(mapB, [mhd], collection);
+    expect(stockA.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(0);
+    expect(stockB.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
   });
 });

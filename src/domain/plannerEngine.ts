@@ -3,9 +3,12 @@ import type {
   AxialCoord,
   BrushSelection,
   Collection,
+  MapDocument,
   Placement,
   PlacementKey,
   RotationStep,
+  Tile,
+  TileFace,
   Tileset,
 } from './types';
 
@@ -223,4 +226,137 @@ export function computeStock(
   }
 
   return { byTileKey, overBudgetCoords };
+}
+
+export function validatePlacements(input: unknown): Placement[] | null {
+  if (!Array.isArray(input)) return null;
+  const result: Placement[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const raw = item as Record<string, unknown>;
+    if (
+      typeof raw.q !== 'number' ||
+      !Number.isInteger(raw.q) ||
+      typeof raw.r !== 'number' ||
+      !Number.isInteger(raw.r) ||
+      typeof raw.tilesetId !== 'string' ||
+      raw.tilesetId.trim().length === 0 ||
+      typeof raw.tileId !== 'string' ||
+      raw.tileId.trim().length === 0 ||
+      typeof raw.faceNumber !== 'number' ||
+      !Number.isInteger(raw.faceNumber) ||
+      raw.faceNumber < 1 ||
+      typeof raw.rotation !== 'number' ||
+      !Number.isInteger(raw.rotation) ||
+      raw.rotation < 0 ||
+      raw.rotation > 5
+    ) {
+      return null;
+    }
+    result.push({
+      q: raw.q === 0 ? 0 : raw.q,
+      r: raw.r === 0 ? 0 : raw.r,
+      tilesetId: raw.tilesetId,
+      tileId: raw.tileId,
+      faceNumber: raw.faceNumber,
+      rotation: raw.rotation as RotationStep,
+    });
+  }
+  return result;
+}
+
+export type MapJsonParseResult =
+  | { ok: true; map: MapDocument }
+  | { ok: false; error: string };
+
+export function validateAndParseMapJson(raw: string): MapJsonParseResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: 'File is not valid JSON.' };
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'Map JSON must be an object.' };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  if (obj.version !== 1) {
+    return { ok: false, error: 'Unsupported or missing Map version (expected version: 1).' };
+  }
+  if (typeof obj.name !== 'string' || obj.name.trim().length === 0) {
+    return { ok: false, error: 'Map JSON is missing a valid name.' };
+  }
+
+  const placements = validatePlacements(obj.placements);
+  if (!placements) {
+    return { ok: false, error: 'Map JSON contains invalid Placements.' };
+  }
+
+  const now = new Date().toISOString();
+  const id = typeof obj.id === 'string' && obj.id.trim().length > 0 ? obj.id.trim() : 'imported-map';
+  const createdAt = typeof obj.createdAt === 'string' ? obj.createdAt : now;
+  const updatedAt = typeof obj.updatedAt === 'string' ? obj.updatedAt : now;
+
+  return {
+    ok: true,
+    map: {
+      version: 1,
+      id,
+      name: obj.name.trim(),
+      createdAt,
+      updatedAt,
+      placements,
+    },
+  };
+}
+
+export type ResolvedPlacementAsset =
+  | {
+      status: 'ok';
+      url: string;
+      shortCode: string;
+      tile: Tile;
+      face: TileFace;
+    }
+  | {
+      status: 'missing-tileset' | 'missing-face';
+      url: null;
+      shortCode: string | null;
+      tile: null;
+      face: null;
+    };
+
+export function resolvePlacementAsset(
+  placement: Placement,
+  tilesetsById: ReadonlyMap<string, Tileset>,
+): ResolvedPlacementAsset {
+  const tileset = tilesetsById.get(placement.tilesetId);
+  if (!tileset) {
+    return {
+      status: 'missing-tileset',
+      url: null,
+      shortCode: null,
+      tile: null,
+      face: null,
+    };
+  }
+
+  for (const tile of tileset.tiles) {
+    if (tile.faceA.faceNumber === placement.faceNumber) {
+      return { status: 'ok', url: tile.faceA.url, shortCode: tileset.shortCode, tile, face: tile.faceA };
+    }
+    if (tile.faceB.faceNumber === placement.faceNumber) {
+      return { status: 'ok', url: tile.faceB.url, shortCode: tileset.shortCode, tile, face: tile.faceB };
+    }
+  }
+
+  return {
+    status: 'missing-face',
+    url: null,
+    shortCode: tileset.shortCode,
+    tile: null,
+    face: null,
+  };
 }

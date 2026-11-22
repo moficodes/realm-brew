@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { fetchCollection, fetchTilesets, saveCollection } from './api/client';
+import { X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createMap,
+  deleteMap,
+  fetchCollection,
+  fetchMap,
+  fetchMaps,
+  fetchTilesets,
+  saveCollection,
+  saveMap,
+} from './api/client';
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -26,9 +36,18 @@ import {
   rotatePlacement,
   rotateStep,
   undoHistory,
+  validateAndParseMapJson,
   type HistoryState,
 } from './domain/plannerEngine';
-import type { AxialCoord, BrushSelection, Collection, Placement, Tileset } from './domain/types';
+import type {
+  AxialCoord,
+  BrushSelection,
+  Collection,
+  MapDocument,
+  MapSummary,
+  Placement,
+  Tileset,
+} from './domain/types';
 
 function isInputFocused(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -40,10 +59,25 @@ function isInputFocused(target: EventTarget | null): boolean {
   );
 }
 
+function slugifyFilename(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'realm-brew-map'
+  );
+}
+
 export function App() {
   const [tilesets, setTilesets] = useState<Tileset[]>([]);
   const [collection, setCollection] = useState<Collection>({});
   const [bundleError, setBundleError] = useState<string | undefined>();
+  const [appBannerError, setAppBannerError] = useState<string | null>(null);
+
+  const [maps, setMaps] = useState<MapSummary[]>([]);
+  const [activeMap, setActiveMap] = useState<MapDocument | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
   const [selectedTilesetId, setSelectedTilesetId] = useState<string | 'all'>('all');
   const [inStockOnly, setInStockOnly] = useState(false);
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
@@ -58,24 +92,111 @@ export function App() {
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
   const [collectionDialogOpen, setCollectionDialogOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [deleteMapConfirmOpen, setDeleteMapConfirmOpen] = useState(false);
 
   const placements = history.present;
 
+  const saveTimerRef = useRef<number | null>(null);
+  const pendingSaveRef = useRef<{ id: string; name: string; placements: Placement[] } | null>(null);
+
+  const persistNow = useCallback(
+    async (payload: { id: string; name: string; placements: Placement[] }) => {
+      setSaveStatus('saving');
+      try {
+        const updated = await saveMap(payload.id, payload.name, payload.placements);
+        setMaps((prev) =>
+          prev.map((m) =>
+            m.id === updated.id
+              ? {
+                  id: updated.id,
+                  name: updated.name,
+                  placementCount: updated.placements.length,
+                  updatedAt: updated.updatedAt,
+                }
+              : m,
+          ),
+        );
+        setSaveStatus('saved');
+      } catch {
+        setSaveStatus('error');
+      }
+    },
+    [],
+  );
+
+  const flushPendingSave = useCallback(async () => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    const pending = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    if (pending) {
+      await persistNow(pending);
+    }
+  }, [persistNow]);
+
+  const scheduleAutoSave = useCallback(
+    (id: string, name: string, nextPlacements: Placement[]) => {
+      pendingSaveRef.current = { id, name, placements: nextPlacements };
+      setSaveStatus('saving');
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      saveTimerRef.current = window.setTimeout(() => {
+        saveTimerRef.current = null;
+        const payload = pendingSaveRef.current;
+        pendingSaveRef.current = null;
+        if (payload) {
+          void persistNow(payload);
+        }
+      }, 400);
+    },
+    [persistNow],
+  );
+
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchTilesets(), fetchCollection()])
-      .then(([catalog, col]) => {
+    Promise.all([fetchTilesets(), fetchCollection(), fetchMaps()])
+      .then(async ([catalog, col, mapList]) => {
         if (cancelled) return;
         setTilesets(catalog.tilesets);
         setBundleError(catalog.bundleConfigured ? undefined : catalog.error);
         setCollection(col);
+
+        if (mapList.length === 0) {
+          const initial = await createMap('Untitled Map', []);
+          if (cancelled) return;
+          setMaps([
+            {
+              id: initial.id,
+              name: initial.name,
+              placementCount: 0,
+              updatedAt: initial.updatedAt,
+            },
+          ]);
+          setActiveMap(initial);
+          setHistory(createHistory(initial.placements));
+          setSaveStatus('saved');
+        } else {
+          setMaps(mapList);
+          const loaded = await fetchMap(mapList[0].id);
+          if (cancelled) return;
+          setActiveMap(loaded);
+          setHistory(createHistory(loaded.placements));
+          setSaveStatus('saved');
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setBundleError(err instanceof Error ? err.message : 'Unable to load Tilesets');
+        setBundleError(err instanceof Error ? err.message : 'Unable to load workspace');
       });
+
     return () => {
       cancelled = true;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
     };
   }, []);
 
@@ -92,9 +213,158 @@ export function App() {
     [placements, tilesets, collection],
   );
 
-  const commitPlacements = useCallback((updater: (current: Placement[]) => Placement[]) => {
-    setHistory((prev) => commitHistory(prev, updater(prev.present)));
-  }, []);
+  const commitPlacements = useCallback(
+    (updater: (current: Placement[]) => Placement[]) => {
+      setHistory((prev) => {
+        const nextPlacements = updater(prev.present);
+        if (activeMap) {
+          scheduleAutoSave(activeMap.id, activeMap.name, nextPlacements);
+        }
+        return commitHistory(prev, nextPlacements);
+      });
+    },
+    [activeMap, scheduleAutoSave],
+  );
+
+  const loadMapIntoEditor = useCallback((doc: MapDocument) => {
+    setActiveMap(doc);
+    setHistory(createHistory(doc.placements));
+    setSelectedCoord(null);
+    setSaveStatus('saved');
+    setCamera(
+      doc.placements.length > 0
+        ? computeFitCamera(doc.placements, viewportSize.width, viewportSize.height, 56)
+        : DEFAULT_CAMERA,
+    );
+  }, [viewportSize.height, viewportSize.width]);
+
+  const handleSelectMap = useCallback(
+    async (id: string) => {
+      if (activeMap?.id === id) return;
+      await flushPendingSave();
+      try {
+        const doc = await fetchMap(id);
+        loadMapIntoEditor(doc);
+      } catch (err) {
+        setAppBannerError(err instanceof Error ? err.message : 'Failed to load Map');
+      }
+    },
+    [activeMap?.id, flushPendingSave, loadMapIntoEditor],
+  );
+
+  const handleCreateMap = useCallback(async () => {
+    await flushPendingSave();
+    try {
+      const nextNum = maps.length + 1;
+      const created = await createMap(`Map ${nextNum}`, []);
+      setMaps((prev) => [
+        {
+          id: created.id,
+          name: created.name,
+          placementCount: 0,
+          updatedAt: created.updatedAt,
+        },
+        ...prev,
+      ]);
+      loadMapIntoEditor(created);
+    } catch (err) {
+      setAppBannerError(err instanceof Error ? err.message : 'Failed to create Map');
+    }
+  }, [flushPendingSave, loadMapIntoEditor, maps.length]);
+
+  const handleRenameMap = useCallback(
+    async (nextName: string) => {
+      if (!activeMap) return;
+      const updatedLocal: MapDocument = { ...activeMap, name: nextName };
+      setActiveMap(updatedLocal);
+      setMaps((prev) => prev.map((m) => (m.id === activeMap.id ? { ...m, name: nextName } : m)));
+      scheduleAutoSave(activeMap.id, nextName, placements);
+    },
+    [activeMap, placements, scheduleAutoSave],
+  );
+
+  const handleConfirmDeleteMap = useCallback(async () => {
+    setDeleteMapConfirmOpen(false);
+    if (!activeMap) return;
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    pendingSaveRef.current = null;
+
+    const deletedId = activeMap.id;
+    try {
+      await deleteMap(deletedId);
+      const remaining = maps.filter((m) => m.id !== deletedId);
+      if (remaining.length === 0) {
+        const fresh = await createMap('Untitled Map', []);
+        setMaps([
+          {
+            id: fresh.id,
+            name: fresh.name,
+            placementCount: 0,
+            updatedAt: fresh.updatedAt,
+          },
+        ]);
+        loadMapIntoEditor(fresh);
+      } else {
+        setMaps(remaining);
+        const nextDoc = await fetchMap(remaining[0].id);
+        loadMapIntoEditor(nextDoc);
+      }
+    } catch (err) {
+      setAppBannerError(err instanceof Error ? err.message : 'Failed to delete Map');
+    }
+  }, [activeMap, loadMapIntoEditor, maps]);
+
+  const handleExportJson = useCallback(async () => {
+    if (!activeMap) return;
+    await flushPendingSave();
+    const doc: MapDocument = {
+      version: 1,
+      id: activeMap.id,
+      name: activeMap.name,
+      createdAt: activeMap.createdAt,
+      updatedAt: new Date().toISOString(),
+      placements,
+    };
+    const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${slugifyFilename(activeMap.name)}.realm-brew.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [activeMap, flushPendingSave, placements]);
+
+  const handleImportJsonFile = useCallback(
+    async (file: File) => {
+      try {
+        const text = await file.text();
+        const parsed = validateAndParseMapJson(text);
+        if (!parsed.ok) {
+          setAppBannerError(`Import failed: ${parsed.error}`);
+          return;
+        }
+        await flushPendingSave();
+        const created = await createMap(parsed.map.name, parsed.map.placements);
+        setMaps((prev) => [
+          {
+            id: created.id,
+            name: created.name,
+            placementCount: created.placements.length,
+            updatedAt: created.updatedAt,
+          },
+          ...prev,
+        ]);
+        loadMapIntoEditor(created);
+        setAppBannerError(null);
+      } catch (err) {
+        setAppBannerError(err instanceof Error ? err.message : 'Failed to import Map JSON');
+      }
+    },
+    [flushPendingSave, loadMapIntoEditor],
+  );
 
   const handleSelectBrush = useCallback((brush: BrushSelection | null) => {
     setActiveBrush(brush);
@@ -150,10 +420,13 @@ export function App() {
         const beforeFace = findPlacementAt(prev.present, selectedCoord)?.faceNumber;
         const afterFace = findPlacementAt(next, selectedCoord)?.faceNumber;
         if (beforeFace === afterFace) return prev;
+        if (activeMap) {
+          scheduleAutoSave(activeMap.id, activeMap.name, next);
+        }
         return commitHistory(prev, next);
       });
     }
-  }, [activeBrush, selectedCoord, tilesets]);
+  }, [activeBrush, activeMap, scheduleAutoSave, selectedCoord, tilesets]);
 
   const handleMoveOrSwap = useCallback(
     (from: AxialCoord, to: AxialCoord) => {
@@ -172,14 +445,26 @@ export function App() {
   );
 
   const handleUndo = useCallback(() => {
-    setHistory((prev) => undoHistory(prev));
+    setHistory((prev) => {
+      const next = undoHistory(prev);
+      if (activeMap && next.present !== prev.present) {
+        scheduleAutoSave(activeMap.id, activeMap.name, next.present);
+      }
+      return next;
+    });
     setSelectedCoord(null);
-  }, []);
+  }, [activeMap, scheduleAutoSave]);
 
   const handleRedo = useCallback(() => {
-    setHistory((prev) => redoHistory(prev));
+    setHistory((prev) => {
+      const next = redoHistory(prev);
+      if (activeMap && next.present !== prev.present) {
+        scheduleAutoSave(activeMap.id, activeMap.name, next.present);
+      }
+      return next;
+    });
     setSelectedCoord(null);
-  }, []);
+  }, [activeMap, scheduleAutoSave]);
 
   const handleConfirmClearMap = useCallback(() => {
     commitPlacements((prev) => clearMap(prev));
@@ -256,6 +541,16 @@ export function App() {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-[#161412] text-stone-100">
       <Toolbar
+        maps={maps}
+        activeMapId={activeMap?.id ?? null}
+        activeMapName={activeMap?.name ?? 'Untitled Map'}
+        saveStatus={saveStatus}
+        onSelectMap={(id) => void handleSelectMap(id)}
+        onCreateMap={() => void handleCreateMap()}
+        onRenameMap={(name) => void handleRenameMap(name)}
+        onRequestDeleteMap={() => setDeleteMapConfirmOpen(true)}
+        onExportJson={() => void handleExportJson()}
+        onImportJsonFile={(file) => void handleImportJsonFile(file)}
         showGrid={showGrid}
         onToggleGrid={() => setShowGrid((g) => !g)}
         zoom={camera.zoom}
@@ -275,6 +570,23 @@ export function App() {
         onRequestClearMap={() => setClearConfirmOpen(true)}
         onOpenCollection={() => setCollectionDialogOpen(true)}
       />
+
+      {appBannerError && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-center justify-between border-b border-red-500/40 bg-red-950/60 px-4 py-2 text-xs text-red-200"
+        >
+          <span>{appBannerError}</span>
+          <button
+            type="button"
+            onClick={() => setAppBannerError(null)}
+            aria-label="Dismiss error"
+            className="rounded p-0.5 text-red-300 hover:bg-red-900/60"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
         <TilePalette
@@ -329,6 +641,15 @@ export function App() {
         confirmLabel="Clear Map"
         onConfirm={handleConfirmClearMap}
         onCancel={() => setClearConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={deleteMapConfirmOpen}
+        title={`Delete "${activeMap?.name ?? 'Map'}"?`}
+        description="This permanently deletes this saved Map from your local .data/maps directory."
+        confirmLabel="Delete Map"
+        onConfirm={() => void handleConfirmDeleteMap()}
+        onCancel={() => setDeleteMapConfirmOpen(false)}
       />
     </div>
   );

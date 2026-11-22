@@ -274,3 +274,116 @@ describe('Middleware HTTP API (Seam 1 - Collection Persistence)', () => {
     expect(badShape.status).toBe(400);
   });
 });
+
+describe('Middleware HTTP API (Seam 1 - Map CRUD Persistence)', () => {
+  const cleanupDirs: string[] = [];
+  const openServers: RunningServer[] = [];
+
+  afterEach(async () => {
+    while (openServers.length > 0) {
+      await openServers.pop()!.close();
+    }
+    while (cleanupDirs.length > 0) {
+      fs.rmSync(cleanupDirs.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  it('creates, lists, reads, updates, and deletes Map JSON documents on disk', async () => {
+    const bundleDir = makeTempDir('rb-bundle-');
+    const dataDir = makeTempDir('rb-data-');
+    cleanupDirs.push(bundleDir, dataDir);
+
+    const srv = await startTestServer(bundleDir, dataDir);
+    openServers.push(srv);
+
+    const listEmpty = await fetch(`${srv.baseUrl}/api/maps`);
+    expect(listEmpty.status).toBe(200);
+    expect(await listEmpty.json()).toEqual({ maps: [] });
+
+    const createRes = await fetch(`${srv.baseUrl}/api/maps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Session 4 Crypt',
+        placements: [
+          { q: 0, r: 0, tilesetId: 'man-hewn-dungeons', tileId: '01-02', faceNumber: 1, rotation: 2 },
+        ],
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json();
+    expect(created.version).toBe(1);
+    expect(created.name).toBe('Session 4 Crypt');
+    expect(created.placements).toHaveLength(1);
+    expect(fs.existsSync(path.join(dataDir, 'maps', `${created.id}.json`))).toBe(true);
+
+    const listOne = await fetch(`${srv.baseUrl}/api/maps`);
+    const listBody = await listOne.json();
+    expect(listBody.maps).toHaveLength(1);
+    expect(listBody.maps[0]).toMatchObject({
+      id: created.id,
+      name: 'Session 4 Crypt',
+      placementCount: 1,
+    });
+
+    const getOne = await fetch(`${srv.baseUrl}/api/maps/${created.id}`);
+    expect(getOne.status).toBe(200);
+    expect((await getOne.json()).name).toBe('Session 4 Crypt');
+
+    const putRes = await fetch(`${srv.baseUrl}/api/maps/${created.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...created,
+        name: 'Session 4 Crypt (Revised)',
+        placements: [
+          ...created.placements,
+          { q: 1, r: 0, tilesetId: 'missing-set', tileId: '99-100', faceNumber: 99, rotation: 0 },
+        ],
+      }),
+    });
+    expect(putRes.status).toBe(200);
+    const updated = await putRes.json();
+    expect(updated.name).toBe('Session 4 Crypt (Revised)');
+    expect(updated.placements).toHaveLength(2);
+
+    const delRes = await fetch(`${srv.baseUrl}/api/maps/${created.id}`, { method: 'DELETE' });
+    expect(delRes.status).toBe(204);
+    expect(fs.existsSync(path.join(dataDir, 'maps', `${created.id}.json`))).toBe(false);
+    expect((await fetch(`${srv.baseUrl}/api/maps/${created.id}`)).status).toBe(404);
+  });
+
+  it('rejects unsafe Map IDs and invalid Map payloads', async () => {
+    const bundleDir = makeTempDir('rb-bundle-');
+    const dataDir = makeTempDir('rb-data-');
+    cleanupDirs.push(bundleDir, dataDir);
+
+    const srv = await startTestServer(bundleDir, dataDir);
+    openServers.push(srv);
+
+    const unsafeGet = await fetch(`${srv.baseUrl}/api/maps/..%2Fcollection`);
+    expect(unsafeGet.status).toBe(400);
+
+    const badCharsGet = await fetch(`${srv.baseUrl}/api/maps/bad$id!`);
+    expect(badCharsGet.status).toBe(400);
+
+    const createRes = await fetch(`${srv.baseUrl}/api/maps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Valid Map' }),
+    });
+    const created = await createRes.json();
+
+    const invalidPut = await fetch(`${srv.baseUrl}/api/maps/${created.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        version: 1,
+        id: created.id,
+        name: 'Valid Map',
+        placements: [{ q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 9 }],
+      }),
+    });
+    expect(invalidPut.status).toBe(400);
+  });
+});

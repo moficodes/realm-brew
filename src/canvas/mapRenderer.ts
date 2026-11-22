@@ -9,7 +9,7 @@ import {
   screenToWorld,
   type Camera,
 } from '../domain/hexGeometry';
-import { findPlacementAt } from '../domain/plannerEngine';
+import { findPlacementAt, resolvePlacementAsset } from '../domain/plannerEngine';
 import type { AxialCoord, BrushSelection, Placement, PlacementKey, RotationStep, Tileset } from '../domain/types';
 import type { TileImageCache } from './imageCache';
 
@@ -51,20 +51,6 @@ export function traceHexPath(
   ctx.closePath();
 }
 
-export function resolveFaceUrl(
-  tilesetsById: ReadonlyMap<string, Tileset>,
-  tilesetId: string,
-  faceNumber: number,
-): string | null {
-  const tileset = tilesetsById.get(tilesetId);
-  if (!tileset) return null;
-  for (const tile of tileset.tiles) {
-    if (tile.faceA.faceNumber === faceNumber) return tile.faceA.url;
-    if (tile.faceB.faceNumber === faceNumber) return tile.faceB.url;
-  }
-  return null;
-}
-
 function drawHexGrid(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -97,6 +83,42 @@ function drawHexGrid(
   ctx.restore();
 }
 
+function drawMissingPlaceholderHex(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  tilesetLabel: string,
+  faceNumber: number,
+  alpha = 1,
+): void {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  traceHexPath(ctx, cx, cy, HEX_RADIUS - 1);
+  ctx.fillStyle = '#292123';
+  ctx.fill();
+
+  traceHexPath(ctx, cx, cy, HEX_RADIUS - 5);
+  ctx.setLineDash([7, 5]);
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.65)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const paddedFace = String(faceNumber).padStart(2, '0');
+  const shortLabel = tilesetLabel.length > 14 ? `${tilesetLabel.slice(0, 13)}…` : tilesetLabel;
+
+  ctx.fillStyle = '#fbbf24';
+  ctx.font = '700 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('MISSING ASSET', cx, cy - 12);
+
+  ctx.fillStyle = '#e7e5e4';
+  ctx.font = '600 12px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText(`${shortLabel} #${paddedFace}`, cx, cy + 10);
+  ctx.restore();
+}
+
 function drawTileFaceAt(
   ctx: CanvasRenderingContext2D,
   cx: number,
@@ -122,6 +144,35 @@ function drawTileFaceAt(
   }
 
   ctx.restore();
+}
+
+function drawPlacementGraphic(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  placement: Pick<Placement, 'tilesetId' | 'tileId' | 'faceNumber' | 'rotation'>,
+  tilesetsById: ReadonlyMap<string, Tileset>,
+  imageCache: TileImageCache,
+  alpha = 1,
+): void {
+  const asset = resolvePlacementAsset(
+    { ...placement, q: 0, r: 0 },
+    tilesetsById,
+  );
+  if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
+    drawMissingPlaceholderHex(
+      ctx,
+      cx,
+      cy,
+      asset.shortCode ?? placement.tilesetId,
+      placement.faceNumber,
+      alpha,
+    );
+    return;
+  }
+
+  const img = imageCache.get(asset.url);
+  drawTileFaceAt(ctx, cx, cy, placement.rotation, img, alpha);
 }
 
 function drawOverBudgetOutline(
@@ -186,16 +237,21 @@ export function renderMapViewport({
       placement.q === dragMove.from.q &&
       placement.r === dragMove.from.r;
     const { x, y } = axialToWorld(placement.q, placement.r, HEX_RADIUS);
-    const url = resolveFaceUrl(tilesetsById, placement.tilesetId, placement.faceNumber);
-    const img = url ? imageCache.get(url) : null;
-    drawTileFaceAt(ctx, x, y, placement.rotation, img, isDragOrigin ? 0.28 : 1);
+    drawPlacementGraphic(
+      ctx,
+      x,
+      y,
+      placement,
+      tilesetsById,
+      imageCache,
+      isDragOrigin ? 0.28 : 1,
+    );
 
     if (!isDragOrigin && overBudgetCoords.has(axialKey(placement.q, placement.r))) {
       drawOverBudgetOutline(ctx, x, y, camera.zoom);
     }
   }
 
-  // Highlight selected Placement
   if (selectedCoord && !dragMove) {
     const selectedPlacement = findPlacementAt(placements, selectedCoord);
     if (selectedPlacement) {
@@ -209,18 +265,15 @@ export function renderMapViewport({
     }
   }
 
-  // Preview dragging an existing Placement to empty/occupied target hex
   if (dragMove && dragMove.to) {
     const moving = findPlacementAt(placements, dragMove.from);
     if (moving) {
       const { x, y } = axialToWorld(dragMove.to.q, dragMove.to.r, HEX_RADIUS);
-      const url = resolveFaceUrl(tilesetsById, moving.tilesetId, moving.faceNumber);
-      const img = url ? imageCache.get(url) : null;
       const isOccupiedTarget =
         (dragMove.to.q !== dragMove.from.q || dragMove.to.r !== dragMove.from.r) &&
         Boolean(findPlacementAt(placements, dragMove.to));
 
-      drawTileFaceAt(ctx, x, y, moving.rotation, img, 0.72);
+      drawPlacementGraphic(ctx, x, y, moving, tilesetsById, imageCache, 0.72);
       ctx.save();
       traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
       ctx.strokeStyle = isOccupiedTarget ? '#38bdf8' : '#fbbf24';
@@ -230,9 +283,7 @@ export function renderMapViewport({
     }
   } else if (hoveredCoord && activeBrush) {
     const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
-    const url = resolveFaceUrl(tilesetsById, activeBrush.tilesetId, activeBrush.faceNumber);
-    const img = url ? imageCache.get(url) : null;
-    drawTileFaceAt(ctx, x, y, activeBrush.rotation, img, 0.55);
+    drawPlacementGraphic(ctx, x, y, activeBrush, tilesetsById, imageCache, 0.55);
 
     ctx.save();
     traceHexPath(ctx, x, y, HEX_RADIUS - 1);

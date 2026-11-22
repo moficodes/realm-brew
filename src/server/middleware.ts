@@ -1,9 +1,20 @@
 import fs from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
+import { validatePlacements } from '../domain/plannerEngine';
 import type { TilesetCatalogResponse } from '../domain/types';
 import { discoverTilesets } from './bundleDiscovery';
-import { readCollection, validateCollection, writeCollection } from './persistence';
+import {
+  createMap,
+  deleteMap,
+  isSafeMapId,
+  listMaps,
+  readCollection,
+  readMap,
+  updateMap,
+  validateCollection,
+  writeCollection,
+} from './persistence';
 
 export interface ApiHandlerOptions {
   bundleDir?: string;
@@ -40,6 +51,15 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   }
   const text = Buffer.concat(chunks).toString('utf8');
   return JSON.parse(text);
+}
+
+async function parseJsonOr400(req: IncomingMessage, res: ServerResponse): Promise<unknown | undefined> {
+  try {
+    return await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'Invalid JSON body' });
+    return undefined;
+  }
 }
 
 async function handleApiRequest(
@@ -128,13 +148,8 @@ async function handleApiRequest(
     }
 
     if (method === 'PUT') {
-      let body: unknown;
-      try {
-        body = await readJsonBody(req);
-      } catch {
-        sendJson(res, 400, { error: 'Invalid JSON body' });
-        return;
-      }
+      const body = await parseJsonOr400(req, res);
+      if (body === undefined) return;
       const rawCollection =
         body && typeof body === 'object' && !Array.isArray(body) && 'collection' in body
           ? (body as { collection: unknown }).collection
@@ -149,6 +164,93 @@ async function handleApiRequest(
       writeCollection(options.dataDir, validated);
       const collection = readCollection(options.dataDir, discoveredIds);
       sendJson(res, 200, { collection });
+      return;
+    }
+  }
+
+  if (pathname === '/api/maps') {
+    if (method === 'GET') {
+      sendJson(res, 200, { maps: listMaps(options.dataDir) });
+      return;
+    }
+
+    if (method === 'POST') {
+      const body = await parseJsonOr400(req, res);
+      if (body === undefined) return;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'Invalid Map payload' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'Untitled Map';
+      let placements = [] as ReturnType<typeof validatePlacements>;
+      if (raw.placements !== undefined) {
+        placements = validatePlacements(raw.placements);
+        if (!placements) {
+          sendJson(res, 400, { error: 'Invalid Placements array' });
+          return;
+        }
+      } else {
+        placements = [];
+      }
+      const created = createMap(options.dataDir, { name, placements });
+      sendJson(res, 201, created);
+      return;
+    }
+  }
+
+  if (pathname.startsWith('/api/maps/')) {
+    const rawId = pathname.slice('/api/maps/'.length);
+    const id = safeDecode(rawId);
+    if (!id || rawId.includes('/') || !isSafeMapId(id)) {
+      sendJson(res, 400, { error: 'Invalid Map ID' });
+      return;
+    }
+
+    if (method === 'GET') {
+      const doc = readMap(options.dataDir, id);
+      if (!doc) {
+        sendJson(res, 404, { error: 'Map not found' });
+        return;
+      }
+      sendJson(res, 200, doc);
+      return;
+    }
+
+    if (method === 'PUT') {
+      const body = await parseJsonOr400(req, res);
+      if (body === undefined) return;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'Invalid Map payload' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      if (typeof raw.name !== 'string' || raw.name.trim().length === 0) {
+        sendJson(res, 400, { error: 'Map name is required' });
+        return;
+      }
+      const placements = validatePlacements(raw.placements);
+      if (!placements) {
+        sendJson(res, 400, { error: 'Invalid Placements array' });
+        return;
+      }
+      const updated = updateMap(options.dataDir, id, { name: raw.name, placements });
+      if (!updated) {
+        sendJson(res, 404, { error: 'Map not found' });
+        return;
+      }
+      sendJson(res, 200, updated);
+      return;
+    }
+
+    if (method === 'DELETE') {
+      const deleted = deleteMap(options.dataDir, id);
+      if (!deleted) {
+        sendJson(res, 404, { error: 'Map not found' });
+        return;
+      }
+      res.statusCode = 204;
+      res.end();
       return;
     }
   }
