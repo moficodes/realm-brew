@@ -1,8 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fetchTilesets } from './api/client';
 import { CanvasViewport } from './components/CanvasViewport';
 import { TilePalette } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
+import {
+  DEFAULT_CAMERA,
+  clampZoom,
+  computeFitCamera,
+  type Camera,
+} from './domain/hexGeometry';
 import { placeTile } from './domain/plannerEngine';
 import type { AxialCoord, BrushSelection, Placement, Tileset } from './domain/types';
 
@@ -14,6 +20,8 @@ export function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [activeBrush, setActiveBrush] = useState<BrushSelection | null>(null);
   const [placements, setPlacements] = useState<Placement[]>([]);
+  const [camera, setCamera] = useState<Camera>(DEFAULT_CAMERA);
+  const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
 
   useEffect(() => {
     let cancelled = false;
@@ -64,11 +72,24 @@ export function App() {
     );
   };
 
+  const handleViewportSizeChange = useCallback((nextSize: { width: number; height: number }) => {
+    setViewportSize(nextSize);
+  }, []);
+
+  const handleFitToContent = () => {
+    setCamera(computeFitCamera(placements, viewportSize.width, viewportSize.height, 56));
+  };
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-[#161412] text-stone-100">
       <Toolbar
         showGrid={showGrid}
         onToggleGrid={() => setShowGrid((g) => !g)}
+        zoom={camera.zoom}
+        onZoomIn={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom * 1.25) }))}
+        onZoomOut={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom / 1.25) }))}
+        onResetZoom={() => setCamera((c) => ({ ...c, zoom: 1 }))}
+        onFitToContent={handleFitToContent}
         activeBrush={activeBrush}
         onClearBrush={() => setActiveBrush(null)}
         tilesetsById={tilesetsById}
@@ -92,6 +113,9 @@ export function App() {
           tilesetsById={tilesetsById}
           activeBrush={activeBrush}
           showGrid={showGrid}
+          camera={camera}
+          onCameraChange={setCamera}
+          onViewportSizeChange={handleViewportSizeChange}
           onPlaceAt={handlePlaceAt}
         />
       </main>

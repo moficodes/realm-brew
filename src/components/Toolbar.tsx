@@ -1,9 +1,14 @@
-import { Grid3x3, Hexagon, X } from 'lucide-react';
+import { Grid3x3, Hexagon, Maximize2, X, ZoomIn, ZoomOut } from 'lucide-react';
 import type { BrushSelection, Tileset } from '../domain/types';
 
 interface ToolbarProps {
   showGrid: boolean;
   onToggleGrid: () => void;
+  zoom: number;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onResetZoom: () => void;
+  onFitToContent: () => void;
   activeBrush: BrushSelection | null;
   onClearBrush: () => void;
   tilesetsById: ReadonlyMap<string, Tileset>;
@@ -13,6 +18,11 @@ interface ToolbarProps {
 export function Toolbar({
   showGrid,
   onToggleGrid,
+  zoom,
+  onZoomIn,
+  onZoomOut,
+  onResetZoom,
+  onFitToContent,
   activeBrush,
   onClearBrush,
   tilesetsById,
@@ -53,6 +63,45 @@ export function Toolbar({
             </button>
           </div>
         )}
+
+        <div className="flex items-center rounded-md border border-[#2e2a26] bg-[#1c1917]">
+          <button
+            type="button"
+            onClick={onZoomOut}
+            title="Zoom out"
+            aria-label="Zoom out"
+            className="px-2 py-1.5 text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100"
+          >
+            <ZoomOut className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onResetZoom}
+            title="Reset zoom to 100%"
+            className="min-w-[3.25rem] border-x border-[#2e2a26] px-2 py-1 text-center font-mono text-xs text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100"
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            onClick={onZoomIn}
+            title="Zoom in"
+            aria-label="Zoom in"
+            className="px-2 py-1.5 text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100"
+          >
+            <ZoomIn className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={onFitToContent}
+          title="Fit Map to viewport"
+          className="flex items-center gap-1.5 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2.5 py-1.5 text-xs font-medium text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100"
+        >
+          <Maximize2 className="h-3.5 w-3.5" />
+          <span>Fit</span>
+        </button>
 
         <button
           type="button"

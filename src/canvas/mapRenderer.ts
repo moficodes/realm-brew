@@ -5,6 +5,8 @@ import {
   axialToWorld,
   hexCorners,
   rotationToRadians,
+  screenToWorld,
+  type Camera,
 } from '../domain/hexGeometry';
 import type { AxialCoord, BrushSelection, Placement, Tileset } from '../domain/types';
 import type { TileImageCache } from './imageCache';
@@ -15,6 +17,7 @@ export interface ViewportRenderParams {
   ctx: CanvasRenderingContext2D;
   width: number;
   height: number;
+  camera: Camera;
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
   imageCache: TileImageCache;
@@ -56,18 +59,21 @@ function drawHexGrid(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
+  camera: Camera,
 ): void {
-  const minX = -width / 2 - HEX_WIDTH;
-  const maxX = width / 2 + HEX_WIDTH;
-  const minY = -height / 2 - HEX_HEIGHT;
-  const maxY = height / 2 + HEX_HEIGHT;
+  const topLeft = screenToWorld(0, 0, width, height, camera);
+  const bottomRight = screenToWorld(width, height, width, height, camera);
+  const minX = topLeft.x - HEX_WIDTH;
+  const maxX = bottomRight.x + HEX_WIDTH;
+  const minY = topLeft.y - HEX_HEIGHT;
+  const maxY = bottomRight.y + HEX_HEIGHT;
 
   const qMin = Math.floor(minX / (1.5 * HEX_RADIUS)) - 1;
   const qMax = Math.ceil(maxX / (1.5 * HEX_RADIUS)) + 1;
 
   ctx.save();
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1 / camera.zoom;
 
   for (let q = qMin; q <= qMax; q++) {
     const rMin = Math.floor(minY / HEX_HEIGHT - q / 2) - 1;
@@ -112,6 +118,7 @@ export function renderMapViewport({
   ctx,
   width,
   height,
+  camera,
   placements,
   tilesetsById,
   imageCache,
@@ -124,9 +131,11 @@ export function renderMapViewport({
   ctx.fillRect(0, 0, width, height);
 
   ctx.translate(width / 2, height / 2);
+  ctx.scale(camera.zoom, camera.zoom);
+  ctx.translate(-camera.x, -camera.y);
 
   if (showGrid) {
-    drawHexGrid(ctx, width, height);
+    drawHexGrid(ctx, width, height, camera);
   }
 
   for (const placement of placements) {
@@ -145,7 +154,7 @@ export function renderMapViewport({
     ctx.save();
     traceHexPath(ctx, x, y, HEX_RADIUS - 1);
     ctx.strokeStyle = '#fbbf24';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 / camera.zoom;
     ctx.stroke();
     ctx.restore();
   } else if (hoveredCoord) {
@@ -153,7 +162,7 @@ export function renderMapViewport({
     ctx.save();
     traceHexPath(ctx, x, y, HEX_RADIUS - 1);
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.5 / camera.zoom;
     ctx.stroke();
     ctx.restore();
   }
