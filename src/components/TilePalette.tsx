@@ -11,6 +11,8 @@ interface TilePaletteProps {
   stockByTileKey: ReadonlyMap<string, TileStockEntry>;
   activeBrush: BrushSelection | null;
   onSelectBrush: (brush: BrushSelection | null) => void;
+  onDragFaceStart: (brush: BrushSelection) => void;
+  onDragFaceEnd: () => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   bundleError?: string;
@@ -25,6 +27,8 @@ export function TilePalette({
   stockByTileKey,
   activeBrush,
   onSelectBrush,
+  onDragFaceStart,
+  onDragFaceEnd,
   collapsed,
   onToggleCollapse,
   bundleError,
@@ -86,6 +90,24 @@ export function TilePalette({
       rotation: activeBrush?.rotation ?? 0,
     });
   };
+
+  const makeDragProps = (tilesetId: string, tileId: string, face: TileFace) => ({
+    draggable: true,
+    onDragStart: (e: React.DragEvent<HTMLButtonElement>) => {
+      const payload: BrushSelection = {
+        tilesetId,
+        tileId,
+        faceNumber: face.faceNumber,
+        rotation: activeBrush?.rotation ?? 0,
+      };
+      e.dataTransfer.setData('application/x-realm-brew-face', JSON.stringify(payload));
+      e.dataTransfer.effectAllowed = 'copy';
+      onDragFaceStart(payload);
+    },
+    onDragEnd: () => {
+      onDragFaceEnd();
+    },
+  });
 
   return (
     <aside className="flex h-full w-80 shrink-0 flex-col border-r border-[#2e2a26] bg-[#161412]">
@@ -230,8 +252,9 @@ export function TilePalette({
                       <div className={`grid gap-2 ${tile.isSymmetric ? 'grid-cols-1' : 'grid-cols-2'}`}>
                         <button
                           type="button"
+                          {...makeDragProps(tileset.id, tile.tileId, tile.faceA)}
                           onClick={() => handleFaceClick(tileset.id, tile.tileId, tile.faceA)}
-                          className={`group relative flex flex-col items-center rounded-md border p-1.5 transition ${
+                          className={`group relative flex cursor-grab flex-col items-center rounded-md border p-1.5 transition active:cursor-grabbing ${
                             isFaceAActive
                               ? 'border-amber-400 bg-amber-500/15 ring-1 ring-amber-400/50'
                               : 'border-[#2e2a26] bg-[#221f1c] hover:border-stone-500'
@@ -241,6 +264,7 @@ export function TilePalette({
                             src={tile.faceA.url}
                             alt={`${tileset.name} Face #${tile.faceA.label}`}
                             loading="lazy"
+                            draggable={false}
                             className="h-20 w-full object-contain"
                           />
                           <span className="mt-1 font-mono text-[11px] text-stone-300">
@@ -251,8 +275,9 @@ export function TilePalette({
                         {!tile.isSymmetric && (
                           <button
                             type="button"
+                            {...makeDragProps(tileset.id, tile.tileId, tile.faceB)}
                             onClick={() => handleFaceClick(tileset.id, tile.tileId, tile.faceB)}
-                            className={`group relative flex flex-col items-center rounded-md border p-1.5 transition ${
+                            className={`group relative flex cursor-grab flex-col items-center rounded-md border p-1.5 transition active:cursor-grabbing ${
                               isFaceBActive
                                 ? 'border-amber-400 bg-amber-500/15 ring-1 ring-amber-400/50'
                                 : 'border-[#2e2a26] bg-[#221f1c] hover:border-stone-500'
@@ -262,6 +287,7 @@ export function TilePalette({
                               src={tile.faceB.url}
                               alt={`${tileset.name} Face #${tile.faceB.label}`}
                               loading="lazy"
+                              draggable={false}
                               className="h-20 w-full object-contain"
                             />
                             <span className="mt-1 font-mono text-[11px] text-stone-300">

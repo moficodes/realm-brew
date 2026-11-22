@@ -3,7 +3,7 @@ import { useEffect, type RefObject } from 'react';
 interface UseModalDialogOptions {
   dialogRef: RefObject<HTMLDialogElement | null>;
   open: boolean;
-  onClose: () => void;
+  onClose: (returnValue: string) => void;
   lightDismiss?: boolean;
 }
 
@@ -43,8 +43,9 @@ export function useModalDialog({
     if (!dialog) return;
 
     const handleClose = () => {
+      const value = dialog.returnValue;
       dialog.returnValue = '';
-      onClose();
+      onClose(value);
     };
     dialog.addEventListener('close', handleClose);
 

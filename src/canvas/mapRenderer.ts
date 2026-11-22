@@ -9,10 +9,16 @@ import {
   screenToWorld,
   type Camera,
 } from '../domain/hexGeometry';
-import type { AxialCoord, BrushSelection, Placement, PlacementKey, Tileset } from '../domain/types';
+import { findPlacementAt } from '../domain/plannerEngine';
+import type { AxialCoord, BrushSelection, Placement, PlacementKey, RotationStep, Tileset } from '../domain/types';
 import type { TileImageCache } from './imageCache';
 
 export const MAP_CANVAS_BG = '#221f1c';
+
+export interface DragMovePreview {
+  from: AxialCoord;
+  to: AxialCoord | null;
+}
 
 export interface ViewportRenderParams {
   ctx: CanvasRenderingContext2D;
@@ -24,8 +30,10 @@ export interface ViewportRenderParams {
   imageCache: TileImageCache;
   showGrid: boolean;
   hoveredCoord: AxialCoord | null;
+  selectedCoord: AxialCoord | null;
   activeBrush: BrushSelection | null;
   overBudgetCoords: ReadonlySet<PlacementKey>;
+  dragMove: DragMovePreview | null;
 }
 
 export function traceHexPath(
@@ -93,7 +101,7 @@ function drawTileFaceAt(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
-  rotation: 0 | 1 | 2 | 3 | 4 | 5,
+  rotation: RotationStep,
   image: HTMLImageElement | null,
   alpha = 1,
 ): void {
@@ -116,6 +124,35 @@ function drawTileFaceAt(
   ctx.restore();
 }
 
+function drawOverBudgetOutline(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  zoom: number,
+): void {
+  ctx.save();
+  traceHexPath(ctx, cx, cy, HEX_RADIUS - 2);
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = Math.max(2.5, 3 / zoom);
+  ctx.stroke();
+
+  const badgeX = cx + HEX_RADIUS * 0.42;
+  const badgeY = cy - HEX_RADIUS * 0.62;
+  ctx.beginPath();
+  ctx.arc(badgeX, badgeY, 11, 0, Math.PI * 2);
+  ctx.fillStyle = '#dc2626';
+  ctx.fill();
+  ctx.strokeStyle = '#161412';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('!', badgeX, badgeY + 0.5);
+  ctx.restore();
+}
+
 export function renderMapViewport({
   ctx,
   width,
@@ -126,8 +163,10 @@ export function renderMapViewport({
   imageCache,
   showGrid,
   hoveredCoord,
+  selectedCoord,
   activeBrush,
   overBudgetCoords,
+  dragMove,
 }: ViewportRenderParams): void {
   ctx.save();
   ctx.fillStyle = MAP_CANVAS_BG;
@@ -142,38 +181,54 @@ export function renderMapViewport({
   }
 
   for (const placement of placements) {
+    const isDragOrigin =
+      dragMove !== null &&
+      placement.q === dragMove.from.q &&
+      placement.r === dragMove.from.r;
     const { x, y } = axialToWorld(placement.q, placement.r, HEX_RADIUS);
     const url = resolveFaceUrl(tilesetsById, placement.tilesetId, placement.faceNumber);
     const img = url ? imageCache.get(url) : null;
-    drawTileFaceAt(ctx, x, y, placement.rotation, img, 1);
+    drawTileFaceAt(ctx, x, y, placement.rotation, img, isDragOrigin ? 0.28 : 1);
 
-    if (overBudgetCoords.has(axialKey(placement.q, placement.r))) {
+    if (!isDragOrigin && overBudgetCoords.has(axialKey(placement.q, placement.r))) {
+      drawOverBudgetOutline(ctx, x, y, camera.zoom);
+    }
+  }
+
+  // Highlight selected Placement
+  if (selectedCoord && !dragMove) {
+    const selectedPlacement = findPlacementAt(placements, selectedCoord);
+    if (selectedPlacement) {
+      const { x, y } = axialToWorld(selectedPlacement.q, selectedPlacement.r, HEX_RADIUS);
       ctx.save();
-      traceHexPath(ctx, x, y, HEX_RADIUS - 2);
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = Math.max(2.5, 3 / camera.zoom);
+      traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = Math.max(3, 3.5 / camera.zoom);
       ctx.stroke();
-
-      // Warning pill at top-right edge inside hex
-      const badgeX = x + HEX_RADIUS * 0.42;
-      const badgeY = y - HEX_RADIUS * 0.62;
-      ctx.beginPath();
-      ctx.arc(badgeX, badgeY, 11, 0, Math.PI * 2);
-      ctx.fillStyle = '#dc2626';
-      ctx.fill();
-      ctx.strokeStyle = '#161412';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 13px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('!', badgeX, badgeY + 0.5);
       ctx.restore();
     }
   }
 
-  if (hoveredCoord && activeBrush) {
+  // Preview dragging an existing Placement to empty/occupied target hex
+  if (dragMove && dragMove.to) {
+    const moving = findPlacementAt(placements, dragMove.from);
+    if (moving) {
+      const { x, y } = axialToWorld(dragMove.to.q, dragMove.to.r, HEX_RADIUS);
+      const url = resolveFaceUrl(tilesetsById, moving.tilesetId, moving.faceNumber);
+      const img = url ? imageCache.get(url) : null;
+      const isOccupiedTarget =
+        (dragMove.to.q !== dragMove.from.q || dragMove.to.r !== dragMove.from.r) &&
+        Boolean(findPlacementAt(placements, dragMove.to));
+
+      drawTileFaceAt(ctx, x, y, moving.rotation, img, 0.72);
+      ctx.save();
+      traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
+      ctx.strokeStyle = isOccupiedTarget ? '#38bdf8' : '#fbbf24';
+      ctx.lineWidth = Math.max(2.5, 3 / camera.zoom);
+      ctx.stroke();
+      ctx.restore();
+    }
+  } else if (hoveredCoord && activeBrush) {
     const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
     const url = resolveFaceUrl(tilesetsById, activeBrush.tilesetId, activeBrush.faceNumber);
     const img = url ? imageCache.get(url) : null;

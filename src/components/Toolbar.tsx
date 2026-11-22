@@ -1,4 +1,16 @@
-import { AlertTriangle, Grid3x3, Hexagon, Maximize2, Package, X, ZoomIn, ZoomOut } from 'lucide-react';
+import {
+  AlertTriangle,
+  Eraser,
+  Grid3x3,
+  Hexagon,
+  Maximize2,
+  Package,
+  Redo2,
+  Undo2,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import type { BrushSelection, Tileset } from '../domain/types';
 
 interface ToolbarProps {
@@ -14,6 +26,11 @@ interface ToolbarProps {
   tilesetsById: ReadonlyMap<string, Tileset>;
   placementCount: number;
   overBudgetCount: number;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
+  onRequestClearMap: () => void;
   onOpenCollection: () => void;
 }
 
@@ -30,6 +47,11 @@ export function Toolbar({
   tilesetsById,
   placementCount,
   overBudgetCount,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  onRequestClearMap,
   onOpenCollection,
 }: ToolbarProps) {
   const activeTileset = activeBrush ? tilesetsById.get(activeBrush.tilesetId) : undefined;
@@ -76,6 +98,29 @@ export function Toolbar({
             </button>
           </div>
         )}
+
+        <div className="flex items-center rounded-md border border-[#2e2a26] bg-[#1c1917]">
+          <button
+            type="button"
+            onClick={onUndo}
+            disabled={!canUndo}
+            title="Undo (Cmd/Ctrl+Z)"
+            aria-label="Undo"
+            className="px-2 py-1.5 text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onRedo}
+            disabled={!canRedo}
+            title="Redo (Cmd/Ctrl+Shift+Z)"
+            aria-label="Redo"
+            className="border-l border-[#2e2a26] px-2 py-1.5 text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
 
         <div className="flex items-center rounded-md border border-[#2e2a26] bg-[#1c1917]">
           <button
@@ -137,6 +182,17 @@ export function Toolbar({
         >
           <Package className="h-3.5 w-3.5 text-amber-400" />
           <span>Collection</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onRequestClearMap}
+          disabled={placementCount === 0}
+          title="Clear all Placements on this Map"
+          className="flex items-center gap-1.5 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2.5 py-1.5 text-xs font-medium text-stone-300 transition-colors hover:border-red-500/40 hover:bg-red-950/40 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Eraser className="h-3.5 w-3.5" />
+          <span>Clear</span>
         </button>
       </div>
     </header>

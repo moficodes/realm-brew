@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { computeStock, placeTile } from '../src/domain/plannerEngine';
-import type { Collection, Placement, Tileset } from '../src/domain/types';
+import {
+  clearMap,
+  commitHistory,
+  computeStock,
+  createHistory,
+  flipBrush,
+  flipPlacement,
+  moveOrSwapPlacement,
+  placeTile,
+  redoHistory,
+  removePlacement,
+  rotatePlacement,
+  rotateStep,
+  undoHistory,
+} from '../src/domain/plannerEngine';
+import type { BrushSelection, Collection, Placement, Tileset } from '../src/domain/types';
 
 function makeTestTileset(id: string, shortCode: string): Tileset {
   return {
@@ -147,5 +161,100 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     stock = computeStock(placements, [mhd, sr], collection);
     expect(stock.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(2);
     expect(stock.byTileKey.get('man-hewn-dungeons:03-04')?.remaining).toBe(1);
+  });
+
+  it('rotates Placements and steps 60 degrees clockwise and counter-clockwise with wraparound', () => {
+    expect(rotateStep(5, 1)).toBe(0);
+    expect(rotateStep(0, -1)).toBe(5);
+    expect(rotateStep(2, 1)).toBe(3);
+
+    const initial: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'man-hewn-dungeons', tileId: '01-02', faceNumber: 1, rotation: 0 },
+    ];
+    const ccw = rotatePlacement(initial, { q: 0, r: 0 }, -1);
+    expect(ccw[0].rotation).toBe(5);
+    const cw = rotatePlacement(ccw, { q: 0, r: 0 }, 1);
+    expect(cw[0].rotation).toBe(0);
+  });
+
+  it('flips between Side A and Side B with zero net stock change and leaves symmetric Tiles unchanged', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const collection: Collection = { 'man-hewn-dungeons': 2 };
+
+    const initial: Placement[] = [
+      { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 2 },
+      { q: 1, r: 0, tilesetId: mhd.id, tileId: '37-37', faceNumber: 37, rotation: 1 },
+    ];
+
+    const flippedA = flipPlacement(initial, { q: 0, r: 0 }, [mhd]);
+    expect(flippedA.find((p) => p.q === 0 && p.r === 0)?.faceNumber).toBe(2);
+    // Stock stays unchanged on flip
+    expect(computeStock(flippedA, [mhd], collection).byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
+
+    const flippedBack = flipPlacement(flippedA, { q: 0, r: 0 }, [mhd]);
+    expect(flippedBack.find((p) => p.q === 0 && p.r === 0)?.faceNumber).toBe(1);
+
+    // Symmetric _37 stays unchanged
+    const flippedDark = flipPlacement(flippedBack, { q: 1, r: 0 }, [mhd]);
+    expect(flippedDark.find((p) => p.q === 1 && p.r === 0)?.faceNumber).toBe(37);
+
+    // Brush flip works identically
+    const brush: BrushSelection = { tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 3 };
+    expect(flipBrush(brush, [mhd])).toEqual({
+      tilesetId: mhd.id,
+      tileId: '01-02',
+      faceNumber: 2,
+      rotation: 3,
+    });
+  });
+
+  it('moves Placements to empty hexes, swaps occupied hexes, removes Placements, and clears Map', () => {
+    const a: Placement = { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 };
+    const b: Placement = { q: 1, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 4, rotation: 3 };
+
+    const moved = moveOrSwapPlacement([a, b], { q: 0, r: 0 }, { q: 2, r: -1 });
+    expect(moved.find((p) => p.q === 0 && p.r === 0)).toBeUndefined();
+    expect(moved.find((p) => p.q === 2 && p.r === -1)).toMatchObject({ tileId: '01-02', faceNumber: 1, rotation: 0 });
+
+    const swapped = moveOrSwapPlacement(moved, { q: 2, r: -1 }, { q: 1, r: 0 });
+    expect(swapped.find((p) => p.q === 2 && p.r === -1)).toMatchObject({ tileId: '03-04', faceNumber: 4, rotation: 3 });
+    expect(swapped.find((p) => p.q === 1 && p.r === 0)).toMatchObject({ tileId: '01-02', faceNumber: 1, rotation: 0 });
+
+    const removed = removePlacement(swapped, { q: 1, r: 0 });
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toMatchObject({ q: 2, r: -1, tileId: '03-04' });
+
+    expect(clearMap(swapped)).toEqual([]);
+  });
+
+  it('tracks Undo/Redo history across place, edit, and Clear Map and discards redo branch on new edits', () => {
+    const p1: Placement = { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 };
+    const p2: Placement = { q: 1, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 0 };
+
+    let h = createHistory<Placement[]>([]);
+    h = commitHistory(h, placeTile(h.present, p1));
+    h = commitHistory(h, placeTile(h.present, p2));
+    h = commitHistory(h, clearMap());
+    expect(h.present).toEqual([]);
+    expect(h.past).toHaveLength(3);
+
+    // Undo Clear Map
+    h = undoHistory(h);
+    expect(h.present).toHaveLength(2);
+    expect(h.future).toHaveLength(1);
+
+    // Redo Clear Map
+    h = redoHistory(h);
+    expect(h.present).toEqual([]);
+
+    // Undo back to 1 placement and branch with a new edit
+    h = undoHistory(h);
+    h = undoHistory(h);
+    expect(h.present).toEqual([p1]);
+    expect(h.future).toHaveLength(2);
+
+    h = commitHistory(h, rotatePlacement(h.present, { q: 0, r: 0 }, 1));
+    expect(h.future).toEqual([]);
+    expect(h.present[0].rotation).toBe(1);
   });
 });
