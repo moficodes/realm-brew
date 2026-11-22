@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --scrollbar-thumb: #78716c;
+  --scrollbar-track: #1c1917;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background-color: #161412;
+  color: #f5f5f4;
+}
+
+.rb-scroll {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+
+@supports not (scrollbar-color: auto) {
+  .rb-scroll {
+    scrollbar-width: auto;
+  }
+
+  .rb-scroll::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .rb-scroll::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+
+  .rb-scroll::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+dialog:modal {
+  overscroll-behavior: contain;
+  margin: auto;
+}
+
+dialog::backdrop {
+  background-color: rgba(10, 9, 8, 0.72);
+  backdrop-filter: blur(2px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
