@@ -360,3 +360,173 @@ export function resolvePlacementAsset(
     face: null,
   };
 }
+
+export interface PullListFaceUsage {
+  faceNumber: number;
+  label: string;
+  count: number;
+}
+
+export interface PullListItem {
+  tileId: string;
+  displayLabel: string;
+  isSymmetric: boolean;
+  needed: number;
+  owned: number;
+  isOverBudget: boolean;
+  faces: PullListFaceUsage[];
+}
+
+export interface PullListGroup {
+  tilesetId: string;
+  tilesetName: string;
+  shortCode: string;
+  owned: number;
+  totalNeeded: number;
+  items: PullListItem[];
+}
+
+export interface MissingPullListEntry {
+  tilesetId: string;
+  tileId: string;
+  faceNumber: number;
+  label: string;
+  count: number;
+}
+
+export interface PullListSummary {
+  totalPlacements: number;
+  groups: PullListGroup[];
+  missing: MissingPullListEntry[];
+}
+
+export function formatAssemblyLabel(
+  placement: Pick<Placement, 'tilesetId' | 'faceNumber'>,
+  tilesetsById: ReadonlyMap<string, Tileset>,
+): string {
+  const padded = String(placement.faceNumber).padStart(2, '0');
+  const tileset = tilesetsById.get(placement.tilesetId);
+  if (!tileset) {
+    return `?${placement.tilesetId} #${padded}`;
+  }
+  return `${tileset.shortCode} #${padded}`;
+}
+
+export function computePullList(
+  placements: readonly Placement[],
+  tilesets: readonly Tileset[],
+  collection: Collection,
+): PullListSummary {
+  const tilesetsById = new Map<string, Tileset>(tilesets.map((t) => [t.id, t]));
+  const tileFaceCounts = new Map<string, Map<number, number>>();
+  const missingCounts = new Map<string, MissingPullListEntry>();
+
+  for (const p of placements) {
+    const resolved = resolvePlacementAsset(p, tilesetsById);
+    if (resolved.status !== 'ok') {
+      const mKey = `${p.tilesetId}:${p.tileId}:${p.faceNumber}`;
+      const existing = missingCounts.get(mKey);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        missingCounts.set(mKey, {
+          tilesetId: p.tilesetId,
+          tileId: p.tileId,
+          faceNumber: p.faceNumber,
+          label: String(p.faceNumber).padStart(2, '0'),
+          count: 1,
+        });
+      }
+      continue;
+    }
+
+    const key = tileStockKey(p.tilesetId, resolved.tile.tileId);
+    let faceMap = tileFaceCounts.get(key);
+    if (!faceMap) {
+      faceMap = new Map<number, number>();
+      tileFaceCounts.set(key, faceMap);
+    }
+    faceMap.set(p.faceNumber, (faceMap.get(p.faceNumber) ?? 0) + 1);
+  }
+
+  const groups: PullListGroup[] = [];
+  for (const tileset of tilesets) {
+    const owned = collection[tileset.id] ?? DEFAULT_TILESET_COPIES;
+    const items: PullListItem[] = [];
+    let totalNeeded = 0;
+
+    for (const tile of tileset.tiles) {
+      const faceMap = tileFaceCounts.get(tileStockKey(tileset.id, tile.tileId));
+      if (!faceMap) continue;
+
+      const faces: PullListFaceUsage[] = [];
+      let needed = 0;
+      const orderedFaces = tile.isSymmetric ? [tile.faceA] : [tile.faceA, tile.faceB];
+      for (const f of orderedFaces) {
+        const count = faceMap.get(f.faceNumber) ?? 0;
+        if (count > 0) {
+          faces.push({ faceNumber: f.faceNumber, label: f.label, count });
+          needed += count;
+        }
+      }
+
+      if (needed > 0) {
+        totalNeeded += needed;
+        items.push({
+          tileId: tile.tileId,
+          displayLabel: tile.isSymmetric ? `#${tile.faceA.label}` : `${tile.faceA.label}/${tile.faceB.label}`,
+          isSymmetric: tile.isSymmetric,
+          needed,
+          owned,
+          isOverBudget: needed > owned,
+          faces,
+        });
+      }
+    }
+
+    if (items.length > 0) {
+      groups.push({
+        tilesetId: tileset.id,
+        tilesetName: tileset.name,
+        shortCode: tileset.shortCode,
+        owned,
+        totalNeeded,
+        items,
+      });
+    }
+  }
+
+  const missing = Array.from(missingCounts.values()).sort(
+    (a, b) => a.tilesetId.localeCompare(b.tilesetId) || a.faceNumber - b.faceNumber,
+  );
+
+  return {
+    totalPlacements: placements.length,
+    groups,
+    missing,
+  };
+}
+
+export function formatPullListText(mapName: string, pullList: PullListSummary): string {
+  const lines: string[] = [`${mapName} — Pull List (${pullList.totalPlacements} Placements)`];
+
+  for (const group of pullList.groups) {
+    lines.push('');
+    lines.push(`${group.tilesetName} (${group.shortCode}) — ${group.totalNeeded} tiles (own ${group.owned} sets)`);
+    for (const item of group.items) {
+      const faceDetails = item.faces.map((f) => `#${f.label} x${f.count}`).join(', ');
+      const warn = item.isOverBudget ? ` [OVER BUDGET: own ${item.owned}]` : '';
+      lines.push(`  - Tile ${item.displayLabel} x${item.needed} (${faceDetails})${warn}`);
+    }
+  }
+
+  if (pullList.missing.length > 0) {
+    lines.push('');
+    lines.push('Missing Assets');
+    for (const m of pullList.missing) {
+      lines.push(`  - ${m.tilesetId} #${m.label} x${m.count}`);
+    }
+  }
+
+  return lines.join('\n');
+}

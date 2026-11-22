@@ -13,6 +13,7 @@ import {
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { PullListPanel } from './components/PullListPanel';
 import { TilePalette } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
 import {
@@ -24,6 +25,7 @@ import {
 import {
   clearMap,
   commitHistory,
+  computePullList,
   computeStock,
   createHistory,
   findPlacementAt,
@@ -82,6 +84,8 @@ export function App() {
   const [inStockOnly, setInStockOnly] = useState(false);
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
+  const [showLabels, setShowLabels] = useState(false);
+  const [pullListOpen, setPullListOpen] = useState(false);
   const [activeBrush, setActiveBrush] = useState<BrushSelection | null>(null);
   const [draggingBrush, setDraggingBrush] = useState<BrushSelection | null>(null);
   const [selectedCoord, setSelectedCoord] = useState<AxialCoord | null>(null);
@@ -210,6 +214,11 @@ export function App() {
 
   const stock = useMemo(
     () => computeStock(placements, tilesets, collection),
+    [placements, tilesets, collection],
+  );
+
+  const pullList = useMemo(
+    () => computePullList(placements, tilesets, collection),
     [placements, tilesets, collection],
   );
 
@@ -553,6 +562,10 @@ export function App() {
         onImportJsonFile={(file) => void handleImportJsonFile(file)}
         showGrid={showGrid}
         onToggleGrid={() => setShowGrid((g) => !g)}
+        showLabels={showLabels}
+        onToggleLabels={() => setShowLabels((l) => !l)}
+        pullListOpen={pullListOpen}
+        onTogglePullList={() => setPullListOpen((o) => !o)}
         zoom={camera.zoom}
         onZoomIn={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom * 1.25) }))}
         onZoomOut={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom / 1.25) }))}
@@ -613,6 +626,7 @@ export function App() {
           selectedCoord={selectedCoord}
           overBudgetCoords={stock.overBudgetCoords}
           showGrid={showGrid}
+          showLabels={showLabels}
           camera={camera}
           onCameraChange={setCamera}
           onViewportSizeChange={handleViewportSizeChange}
@@ -624,6 +638,14 @@ export function App() {
           onRotateAction={handleRotateAction}
           onFlipAction={handleFlipAction}
         />
+
+        {pullListOpen && (
+          <PullListPanel
+            mapName={activeMap?.name ?? 'Untitled Map'}
+            pullList={pullList}
+            onClose={() => setPullListOpen(false)}
+          />
+        )}
       </main>
 
       <CollectionDialog

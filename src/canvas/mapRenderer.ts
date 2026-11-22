@@ -9,11 +9,19 @@ import {
   screenToWorld,
   type Camera,
 } from '../domain/hexGeometry';
-import { findPlacementAt, resolvePlacementAsset } from '../domain/plannerEngine';
+import {
+  findPlacementAt,
+  formatAssemblyLabel,
+  resolvePlacementAsset,
+} from '../domain/plannerEngine';
 import type { AxialCoord, BrushSelection, Placement, PlacementKey, RotationStep, Tileset } from '../domain/types';
-import type { TileImageCache } from './imageCache';
 
 export const MAP_CANVAS_BG = '#221f1c';
+
+export interface ImageLookup {
+  get: (url: string) => HTMLImageElement | null;
+  isError: (url: string) => boolean;
+}
 
 export interface DragMovePreview {
   from: AxialCoord;
@@ -27,8 +35,9 @@ export interface ViewportRenderParams {
   camera: Camera;
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
-  imageCache: TileImageCache;
+  imageCache: ImageLookup;
   showGrid: boolean;
+  showLabels: boolean;
   hoveredCoord: AxialCoord | null;
   selectedCoord: AxialCoord | null;
   activeBrush: BrushSelection | null;
@@ -48,6 +57,27 @@ export function traceHexPath(
   for (let i = 1; i < corners.length; i++) {
     ctx.lineTo(corners[i].x, corners[i].y);
   }
+  ctx.closePath();
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
   ctx.closePath();
 }
 
@@ -146,13 +176,62 @@ function drawTileFaceAt(
   ctx.restore();
 }
 
-function drawPlacementGraphic(
+export function drawAssemblyLabel(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  rotation: RotationStep,
+  label: string,
+  isOverBudget = false,
+): void {
+  // Subtle orientation arrow marking the Tile's native 0° top edge
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(rotationToRadians(rotation));
+  const tipY = -HEX_HEIGHT / 2 + 6;
+  const baseY = tipY + 11;
+  ctx.beginPath();
+  ctx.moveTo(0, tipY);
+  ctx.lineTo(-7, baseY);
+  ctx.lineTo(7, baseY);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(251, 191, 36, 0.92)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(22, 20, 18, 0.95)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  // Compact centered <ShortCode> #<Face> pill badge (upright)
+  ctx.save();
+  ctx.font = '700 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const textWidth = ctx.measureText(label).width;
+  const pillWidth = Math.max(64, textWidth + 18);
+  const pillHeight = 24;
+  const rx = cx - pillWidth / 2;
+  const ry = cy - pillHeight / 2;
+
+  drawRoundedRect(ctx, rx, ry, pillWidth, pillHeight, 6);
+  ctx.fillStyle = 'rgba(22, 20, 18, 0.86)';
+  ctx.fill();
+  ctx.strokeStyle = isOverBudget ? 'rgba(239, 68, 68, 0.9)' : 'rgba(245, 158, 11, 0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.fillStyle = isOverBudget ? '#fca5a5' : '#fef3c7';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, cy + 0.5);
+  ctx.restore();
+}
+
+export function drawPlacementGraphic(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
   placement: Pick<Placement, 'tilesetId' | 'tileId' | 'faceNumber' | 'rotation'>,
   tilesetsById: ReadonlyMap<string, Tileset>,
-  imageCache: TileImageCache,
+  imageCache: ImageLookup,
   alpha = 1,
 ): void {
   const asset = resolvePlacementAsset(
@@ -213,6 +292,7 @@ export function renderMapViewport({
   tilesetsById,
   imageCache,
   showGrid,
+  showLabels,
   hoveredCoord,
   selectedCoord,
   activeBrush,
@@ -236,7 +316,9 @@ export function renderMapViewport({
       dragMove !== null &&
       placement.q === dragMove.from.q &&
       placement.r === dragMove.from.r;
+    const isOverBudget = overBudgetCoords.has(axialKey(placement.q, placement.r));
     const { x, y } = axialToWorld(placement.q, placement.r, HEX_RADIUS);
+
     drawPlacementGraphic(
       ctx,
       x,
@@ -247,8 +329,19 @@ export function renderMapViewport({
       isDragOrigin ? 0.28 : 1,
     );
 
-    if (!isDragOrigin && overBudgetCoords.has(axialKey(placement.q, placement.r))) {
+    if (!isDragOrigin && isOverBudget) {
       drawOverBudgetOutline(ctx, x, y, camera.zoom);
+    }
+
+    if (!isDragOrigin && showLabels) {
+      drawAssemblyLabel(
+        ctx,
+        x,
+        y,
+        placement.rotation,
+        formatAssemblyLabel(placement, tilesetsById),
+        isOverBudget,
+      );
     }
   }
 

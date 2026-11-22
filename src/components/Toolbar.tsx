@@ -1,11 +1,13 @@
 import {
   AlertTriangle,
+  ClipboardList,
   Eraser,
   Grid3x3,
   Hexagon,
   Maximize2,
   Package,
   Redo2,
+  Tag,
   Undo2,
   X,
   ZoomIn,
@@ -27,6 +29,10 @@ interface ToolbarProps {
   onImportJsonFile: (file: File) => void;
   showGrid: boolean;
   onToggleGrid: () => void;
+  showLabels: boolean;
+  onToggleLabels: () => void;
+  pullListOpen: boolean;
+  onTogglePullList: () => void;
   zoom: number;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -58,6 +64,10 @@ export function Toolbar({
   onImportJsonFile,
   showGrid,
   onToggleGrid,
+  showLabels,
+  onToggleLabels,
+  pullListOpen,
+  onTogglePullList,
   zoom,
   onZoomIn,
   onZoomOut,
@@ -208,6 +218,36 @@ export function Toolbar({
         >
           <Grid3x3 className="h-3.5 w-3.5" />
           <span>Grid</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleLabels}
+          aria-pressed={showLabels}
+          title="Toggle Tile number & orientation labels on Map"
+          className={`flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
+            showLabels
+              ? 'border-amber-500/40 bg-amber-500/15 text-amber-200'
+              : 'border-[#2e2a26] bg-[#1c1917] text-stone-300 hover:bg-stone-800'
+          }`}
+        >
+          <Tag className="h-3.5 w-3.5" />
+          <span>Labels</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onTogglePullList}
+          aria-pressed={pullListOpen}
+          title="Toggle Pull List panel"
+          className={`flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
+            pullListOpen
+              ? 'border-amber-500/40 bg-amber-500/15 text-amber-200'
+              : 'border-[#2e2a26] bg-[#1c1917] text-stone-300 hover:bg-stone-800'
+          }`}
+        >
+          <ClipboardList className="h-3.5 w-3.5" />
+          <span>Pull List</span>
         </button>
 
         <button

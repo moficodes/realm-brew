@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   clearMap,
   commitHistory,
+  computePullList,
   computeStock,
   createHistory,
   flipBrush,
   flipPlacement,
+  formatAssemblyLabel,
+  formatPullListText,
   moveOrSwapPlacement,
   placeTile,
   redoHistory,
@@ -315,5 +318,66 @@ describe('Planner engine placement & inventory (Seam 2)', () => {
     const stockB = computeStock(mapB, [mhd], collection);
     expect(stockA.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(0);
     expect(stockB.byTileKey.get('man-hewn-dungeons:01-02')?.remaining).toBe(1);
+  });
+
+  it('derives grouped Pull List with Face breakdowns, symmetric _37, over-budget flags, missing assets, and text export', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const sr = makeTestTileset('subterranean-rivers', 'SR');
+    const collection: Collection = { 'man-hewn-dungeons': 2, 'subterranean-rivers': 2 };
+
+    const placements: Placement[] = [
+      { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
+      { q: 1, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 2, rotation: 1 },
+      { q: 2, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 2, rotation: 2 },
+      { q: 3, r: 0, tilesetId: mhd.id, tileId: '37-37', faceNumber: 37, rotation: 0 },
+      { q: 0, r: 1, tilesetId: sr.id, tileId: '03-04', faceNumber: 4, rotation: 3 },
+      { q: 1, r: 1, tilesetId: 'lost-pack', tileId: '09-10', faceNumber: 9, rotation: 0 },
+    ];
+
+    const pullList = computePullList(placements, [mhd, sr], collection);
+    expect(pullList.totalPlacements).toBe(6);
+    expect(pullList.groups).toHaveLength(2);
+
+    const mhdGroup = pullList.groups[0];
+    expect(mhdGroup.tilesetId).toBe('man-hewn-dungeons');
+    expect(mhdGroup.items).toHaveLength(2);
+    expect(mhdGroup.items[0]).toMatchObject({
+      tileId: '01-02',
+      needed: 3,
+      owned: 2,
+      isOverBudget: true,
+      faces: [
+        { faceNumber: 1, label: '01', count: 1 },
+        { faceNumber: 2, label: '02', count: 2 },
+      ],
+    });
+    expect(mhdGroup.items[1]).toMatchObject({
+      tileId: '37-37',
+      needed: 1,
+      owned: 2,
+      isOverBudget: false,
+      isSymmetric: true,
+      faces: [{ faceNumber: 37, label: '37', count: 1 }],
+    });
+
+    expect(pullList.missing).toEqual([
+      { tilesetId: 'lost-pack', tileId: '09-10', faceNumber: 9, label: '09', count: 1 },
+    ]);
+
+    const byId = new Map([
+      [mhd.id, mhd],
+      [sr.id, sr],
+    ]);
+    expect(formatAssemblyLabel(placements[0], byId)).toBe('MHD #01');
+    expect(formatAssemblyLabel(placements[3], byId)).toBe('MHD #37');
+    expect(formatAssemblyLabel(placements[5], byId)).toBe('?lost-pack #09');
+
+    const text = formatPullListText('Session 4 Crypt', pullList);
+    expect(text).toContain('Session 4 Crypt');
+    expect(text).toContain('01/02');
+    expect(text).toContain('#01 x1');
+    expect(text).toContain('#02 x2');
+    expect(text).toContain('OVER BUDGET');
+    expect(text).toContain('lost-pack #09');
   });
 });

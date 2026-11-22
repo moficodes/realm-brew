@@ -26,6 +26,7 @@ interface CanvasViewportProps {
   selectedCoord: AxialCoord | null;
   overBudgetCoords: ReadonlySet<PlacementKey>;
   showGrid: boolean;
+  showLabels: boolean;
   camera: Camera;
   onCameraChange: Dispatch<SetStateAction<Camera>>;
   onViewportSizeChange: (size: { width: number; height: number }) => void;
@@ -56,6 +57,7 @@ export function CanvasViewport({
   selectedCoord,
   overBudgetCoords,
   showGrid,
+  showLabels,
   camera,
   onCameraChange,
   onViewportSizeChange,
@@ -194,6 +196,7 @@ export function CanvasViewport({
       tilesetsById,
       imageCache: imageCacheRef.current!,
       showGrid,
+      showLabels,
       hoveredCoord,
       selectedCoord,
       activeBrush: previewBrush,
@@ -206,6 +209,7 @@ export function CanvasViewport({
     placements,
     tilesetsById,
     showGrid,
+    showLabels,
     hoveredCoord,
     selectedCoord,
     previewBrush,
