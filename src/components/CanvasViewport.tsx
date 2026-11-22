@@ -445,12 +445,12 @@ export function CanvasViewport({
       />
 
       {activeTarget && (
-        <div className="absolute inset-x-0 bottom-4 flex justify-center pointer-events-none">
-          <div className="pointer-events-auto flex items-center gap-1.5 rounded-xl border border-[#2e2a26] bg-[#161412]/95 px-3 py-1.5 text-xs shadow-xl backdrop-blur">
-            <span className="mr-1 font-mono font-semibold text-amber-300">
+        <div className="pointer-events-none absolute inset-x-2 bottom-4 flex justify-center">
+          <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 rounded-xl border border-[#2e2a26] bg-[#161412]/95 px-2.5 py-1.5 text-xs shadow-xl backdrop-blur">
+            <span className="mr-0.5 whitespace-nowrap font-mono font-semibold text-amber-300">
               {activeTargetLabel}
             </span>
-            <span className="mr-1.5 rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-300">
+            <span className="mr-1 whitespace-nowrap rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-300">
               {activeTarget.rotation * 60}°
             </span>
 

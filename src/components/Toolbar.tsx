@@ -92,7 +92,7 @@ export function Toolbar({
   const activeLabel = activeBrush ? formatAssemblyLabel(activeBrush, tilesetsById) : null;
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between gap-2 overflow-x-auto border-b border-[#2e2a26] bg-[#161412] px-3">
+    <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#2e2a26] bg-[#161412] px-3 py-1.5">
       <div className="flex shrink-0 items-center gap-2.5">
         <div className="flex h-7 w-7 items-center justify-center rounded-md bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30">
           <Hexagon className="h-4 w-4" />
