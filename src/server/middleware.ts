@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import type { TilesetCatalogResponse } from '../domain/types';
 import { discoverTilesets } from './bundleDiscovery';
+import { readCollection, validateCollection, writeCollection } from './persistence';
 
 export interface ApiHandlerOptions {
   bundleDir?: string;
@@ -32,83 +33,144 @@ function safeDecode(segment: string): string | null {
   }
 }
 
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  }
+  const text = Buffer.concat(chunks).toString('utf8');
+  return JSON.parse(text);
+}
+
+async function handleApiRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: ApiHandlerOptions,
+): Promise<void> {
+  const method = (req.method ?? 'GET').toUpperCase();
+  const rawUrl = req.url ?? '/';
+  const url = new URL(rawUrl, 'http://localhost');
+  const pathname = url.pathname;
+
+  if (method === 'GET' && pathname === '/api/tilesets') {
+    const discovery = discoverTilesets(options.bundleDir);
+    const response: TilesetCatalogResponse = {
+      tilesets: discovery.tilesets.map(({ id, name, shortCode, tiles }) => ({
+        id,
+        name,
+        shortCode,
+        tiles,
+      })),
+      bundleConfigured: discovery.bundleConfigured,
+      ...(discovery.error ? { error: discovery.error } : {}),
+    };
+    sendJson(res, 200, response);
+    return;
+  }
+
+  if (method === 'GET' && pathname.startsWith('/api/assets/')) {
+    const rest = pathname.slice('/api/assets/'.length);
+    const parts = rest.split('/');
+    if (parts.length !== 2) {
+      sendText(res, 404, 'Asset not found');
+      return;
+    }
+
+    const tilesetId = safeDecode(parts[0]);
+    const filename = safeDecode(parts[1]);
+    if (!tilesetId || !filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+      sendText(res, 404, 'Asset not found');
+      return;
+    }
+
+    const discovery = discoverTilesets(options.bundleDir);
+    const tileset = discovery.tilesets.find((t) => t.id === tilesetId);
+    if (!tileset) {
+      sendText(res, 404, 'Tileset not found');
+      return;
+    }
+
+    const expectedFile = tileset.faceFiles.get(filename);
+    if (!expectedFile) {
+      sendText(res, 404, 'Tile face not found');
+      return;
+    }
+
+    const resolvedBase = path.resolve(tileset.dirPath);
+    const resolvedFile = path.resolve(expectedFile);
+    if (!resolvedFile.startsWith(resolvedBase + path.sep) || !fs.existsSync(resolvedFile)) {
+      sendText(res, 404, 'Asset not found');
+      return;
+    }
+
+    const stat = fs.statSync(resolvedFile);
+    if (!stat.isFile()) {
+      sendText(res, 404, 'Asset not found');
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Length', String(stat.size));
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    fs.createReadStream(resolvedFile).pipe(res);
+    return;
+  }
+
+  if (pathname === '/api/collection') {
+    const discovery = discoverTilesets(options.bundleDir);
+    const discoveredIds = discovery.tilesets.map((t) => t.id);
+
+    if (method === 'GET') {
+      const collection = readCollection(options.dataDir, discoveredIds);
+      sendJson(res, 200, { collection });
+      return;
+    }
+
+    if (method === 'PUT') {
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      const rawCollection =
+        body && typeof body === 'object' && !Array.isArray(body) && 'collection' in body
+          ? (body as { collection: unknown }).collection
+          : null;
+      const validated = validateCollection(rawCollection);
+      if (!validated) {
+        sendJson(res, 400, {
+          error: 'Collection must be an object mapping Tileset IDs to non-negative integers',
+        });
+        return;
+      }
+      writeCollection(options.dataDir, validated);
+      const collection = readCollection(options.dataDir, discoveredIds);
+      sendJson(res, 200, { collection });
+      return;
+    }
+  }
+
+  sendJson(res, 404, { error: 'Not found' });
+}
+
 export function createApiHandler(options: ApiHandlerOptions): ConnectMiddleware {
   return (req, res, next) => {
-    const method = (req.method ?? 'GET').toUpperCase();
     const rawUrl = req.url ?? '/';
     const url = new URL(rawUrl, 'http://localhost');
-    const pathname = url.pathname;
-
-    if (!pathname.startsWith('/api/')) {
+    if (!url.pathname.startsWith('/api/')) {
       next();
       return;
     }
 
-    if (method === 'GET' && pathname === '/api/tilesets') {
-      const discovery = discoverTilesets(options.bundleDir);
-      const response: TilesetCatalogResponse = {
-        tilesets: discovery.tilesets.map(({ id, name, shortCode, tiles }) => ({
-          id,
-          name,
-          shortCode,
-          tiles,
-        })),
-        bundleConfigured: discovery.bundleConfigured,
-        ...(discovery.error ? { error: discovery.error } : {}),
-      };
-      sendJson(res, 200, response);
-      return;
-    }
-
-    if (method === 'GET' && pathname.startsWith('/api/assets/')) {
-      const rest = pathname.slice('/api/assets/'.length);
-      const parts = rest.split('/');
-      if (parts.length !== 2) {
-        sendText(res, 404, 'Asset not found');
-        return;
+    void handleApiRequest(req, res, options).catch((err) => {
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          error: err instanceof Error ? err.message : 'Internal server error',
+        });
       }
-
-      const tilesetId = safeDecode(parts[0]);
-      const filename = safeDecode(parts[1]);
-      if (!tilesetId || !filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
-        sendText(res, 404, 'Asset not found');
-        return;
-      }
-
-      const discovery = discoverTilesets(options.bundleDir);
-      const tileset = discovery.tilesets.find((t) => t.id === tilesetId);
-      if (!tileset) {
-        sendText(res, 404, 'Tileset not found');
-        return;
-      }
-
-      const expectedFile = tileset.faceFiles.get(filename);
-      if (!expectedFile) {
-        sendText(res, 404, 'Tile face not found');
-        return;
-      }
-
-      const resolvedBase = path.resolve(tileset.dirPath);
-      const resolvedFile = path.resolve(expectedFile);
-      if (!resolvedFile.startsWith(resolvedBase + path.sep) || !fs.existsSync(resolvedFile)) {
-        sendText(res, 404, 'Asset not found');
-        return;
-      }
-
-      const stat = fs.statSync(resolvedFile);
-      if (!stat.isFile()) {
-        sendText(res, 404, 'Asset not found');
-        return;
-      }
-
-      res.statusCode = 200;
-      res.setHeader('Content-Type', 'image/png');
-      res.setHeader('Content-Length', String(stat.size));
-      res.setHeader('Cache-Control', 'public, max-age=3600');
-      fs.createReadStream(resolvedFile).pipe(res);
-      return;
-    }
-
-    sendJson(res, 404, { error: 'Not found' });
+    });
   };
 }

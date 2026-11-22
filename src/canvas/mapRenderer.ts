@@ -2,13 +2,14 @@ import {
   HEX_HEIGHT,
   HEX_RADIUS,
   HEX_WIDTH,
+  axialKey,
   axialToWorld,
   hexCorners,
   rotationToRadians,
   screenToWorld,
   type Camera,
 } from '../domain/hexGeometry';
-import type { AxialCoord, BrushSelection, Placement, Tileset } from '../domain/types';
+import type { AxialCoord, BrushSelection, Placement, PlacementKey, Tileset } from '../domain/types';
 import type { TileImageCache } from './imageCache';
 
 export const MAP_CANVAS_BG = '#221f1c';
@@ -24,6 +25,7 @@ export interface ViewportRenderParams {
   showGrid: boolean;
   hoveredCoord: AxialCoord | null;
   activeBrush: BrushSelection | null;
+  overBudgetCoords: ReadonlySet<PlacementKey>;
 }
 
 export function traceHexPath(
@@ -125,6 +127,7 @@ export function renderMapViewport({
   showGrid,
   hoveredCoord,
   activeBrush,
+  overBudgetCoords,
 }: ViewportRenderParams): void {
   ctx.save();
   ctx.fillStyle = MAP_CANVAS_BG;
@@ -143,6 +146,31 @@ export function renderMapViewport({
     const url = resolveFaceUrl(tilesetsById, placement.tilesetId, placement.faceNumber);
     const img = url ? imageCache.get(url) : null;
     drawTileFaceAt(ctx, x, y, placement.rotation, img, 1);
+
+    if (overBudgetCoords.has(axialKey(placement.q, placement.r))) {
+      ctx.save();
+      traceHexPath(ctx, x, y, HEX_RADIUS - 2);
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = Math.max(2.5, 3 / camera.zoom);
+      ctx.stroke();
+
+      // Warning pill at top-right edge inside hex
+      const badgeX = x + HEX_RADIUS * 0.42;
+      const badgeY = y - HEX_RADIUS * 0.62;
+      ctx.beginPath();
+      ctx.arc(badgeX, badgeY, 11, 0, Math.PI * 2);
+      ctx.fillStyle = '#dc2626';
+      ctx.fill();
+      ctx.strokeStyle = '#161412';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('!', badgeX, badgeY + 0.5);
+      ctx.restore();
+    }
   }
 
   if (hoveredCoord && activeBrush) {

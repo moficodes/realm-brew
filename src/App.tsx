@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { fetchTilesets } from './api/client';
+import { fetchCollection, fetchTilesets, saveCollection } from './api/client';
 import { CanvasViewport } from './components/CanvasViewport';
+import { CollectionDialog } from './components/CollectionDialog';
 import { TilePalette } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
 import {
@@ -9,27 +10,31 @@ import {
   computeFitCamera,
   type Camera,
 } from './domain/hexGeometry';
-import { placeTile } from './domain/plannerEngine';
-import type { AxialCoord, BrushSelection, Placement, Tileset } from './domain/types';
+import { computeStock, placeTile } from './domain/plannerEngine';
+import type { AxialCoord, BrushSelection, Collection, Placement, Tileset } from './domain/types';
 
 export function App() {
   const [tilesets, setTilesets] = useState<Tileset[]>([]);
+  const [collection, setCollection] = useState<Collection>({});
   const [bundleError, setBundleError] = useState<string | undefined>();
   const [selectedTilesetId, setSelectedTilesetId] = useState<string | 'all'>('all');
+  const [inStockOnly, setInStockOnly] = useState(false);
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [activeBrush, setActiveBrush] = useState<BrushSelection | null>(null);
   const [placements, setPlacements] = useState<Placement[]>([]);
   const [camera, setCamera] = useState<Camera>(DEFAULT_CAMERA);
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
+  const [collectionDialogOpen, setCollectionDialogOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetchTilesets()
-      .then((res) => {
+    Promise.all([fetchTilesets(), fetchCollection()])
+      .then(([catalog, col]) => {
         if (cancelled) return;
-        setTilesets(res.tilesets);
-        setBundleError(res.bundleConfigured ? undefined : res.error);
+        setTilesets(catalog.tilesets);
+        setBundleError(catalog.bundleConfigured ? undefined : catalog.error);
+        setCollection(col);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -42,7 +47,7 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !document.querySelector('dialog[open]')) {
         setActiveBrush(null);
       }
     };
@@ -58,6 +63,11 @@ export function App() {
     return map;
   }, [tilesets]);
 
+  const stock = useMemo(
+    () => computeStock(placements, tilesets, collection),
+    [placements, tilesets, collection],
+  );
+
   const handlePlaceAt = (coord: AxialCoord) => {
     if (!activeBrush) return;
     setPlacements((prev) =>
@@ -70,6 +80,14 @@ export function App() {
         rotation: activeBrush.rotation,
       }),
     );
+  };
+
+  const handleChangeCopies = (tilesetId: string, copies: number) => {
+    const next: Collection = { ...collection, [tilesetId]: copies };
+    setCollection(next);
+    void saveCollection(next).then((persisted) => {
+      setCollection(persisted);
+    });
   };
 
   const handleViewportSizeChange = useCallback((nextSize: { width: number; height: number }) => {
@@ -94,6 +112,8 @@ export function App() {
         onClearBrush={() => setActiveBrush(null)}
         tilesetsById={tilesetsById}
         placementCount={placements.length}
+        overBudgetCount={stock.overBudgetCoords.size}
+        onOpenCollection={() => setCollectionDialogOpen(true)}
       />
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -101,6 +121,9 @@ export function App() {
           tilesets={tilesets}
           selectedTilesetId={selectedTilesetId}
           onSelectTileset={setSelectedTilesetId}
+          inStockOnly={inStockOnly}
+          onToggleInStockOnly={() => setInStockOnly((v) => !v)}
+          stockByTileKey={stock.byTileKey}
           activeBrush={activeBrush}
           onSelectBrush={setActiveBrush}
           collapsed={paletteCollapsed}
@@ -112,6 +135,7 @@ export function App() {
           placements={placements}
           tilesetsById={tilesetsById}
           activeBrush={activeBrush}
+          overBudgetCoords={stock.overBudgetCoords}
           showGrid={showGrid}
           camera={camera}
           onCameraChange={setCamera}
@@ -119,6 +143,14 @@ export function App() {
           onPlaceAt={handlePlaceAt}
         />
       </main>
+
+      <CollectionDialog
+        open={collectionDialogOpen}
+        onClose={() => setCollectionDialogOpen(false)}
+        tilesets={tilesets}
+        collection={collection}
+        onChangeCopies={handleChangeCopies}
+      />
     </div>
   );
 }

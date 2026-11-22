@@ -7,12 +7,13 @@ import {
   zoomCameraAtScreenPoint,
   type Camera,
 } from '../domain/hexGeometry';
-import type { AxialCoord, BrushSelection, Placement, Tileset } from '../domain/types';
+import type { AxialCoord, BrushSelection, Placement, PlacementKey, Tileset } from '../domain/types';
 
 interface CanvasViewportProps {
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
   activeBrush: BrushSelection | null;
+  overBudgetCoords: ReadonlySet<PlacementKey>;
   showGrid: boolean;
   camera: Camera;
   onCameraChange: Dispatch<SetStateAction<Camera>>;
@@ -34,6 +35,7 @@ export function CanvasViewport({
   placements,
   tilesetsById,
   activeBrush,
+  overBudgetCoords,
   showGrid,
   camera,
   onCameraChange,
@@ -157,8 +159,9 @@ export function CanvasViewport({
       showGrid,
       hoveredCoord,
       activeBrush,
+      overBudgetCoords,
     });
-  }, [size, camera, placements, tilesetsById, showGrid, hoveredCoord, activeBrush, renderTick]);
+  }, [size, camera, placements, tilesetsById, showGrid, hoveredCoord, activeBrush, overBudgetCoords, renderTick]);
 
   useEffect(() => {
     draw();

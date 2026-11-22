@@ -1,10 +1,14 @@
-import { ChevronLeft, ChevronRight, Layers } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Layers } from 'lucide-react';
+import { tileStockKey, type TileStockEntry } from '../domain/plannerEngine';
 import type { BrushSelection, TileFace, Tileset } from '../domain/types';
 
 interface TilePaletteProps {
   tilesets: readonly Tileset[];
   selectedTilesetId: string | 'all';
   onSelectTileset: (tilesetId: string | 'all') => void;
+  inStockOnly: boolean;
+  onToggleInStockOnly: () => void;
+  stockByTileKey: ReadonlyMap<string, TileStockEntry>;
   activeBrush: BrushSelection | null;
   onSelectBrush: (brush: BrushSelection | null) => void;
   collapsed: boolean;
@@ -16,6 +20,9 @@ export function TilePalette({
   tilesets,
   selectedTilesetId,
   onSelectTileset,
+  inStockOnly,
+  onToggleInStockOnly,
+  stockByTileKey,
   activeBrush,
   onSelectBrush,
   collapsed,
@@ -44,10 +51,22 @@ export function TilePalette({
     );
   }
 
-  const visibleTilesets =
+  const baseTilesets =
     selectedTilesetId === 'all'
       ? tilesets
       : tilesets.filter((t) => t.id === selectedTilesetId);
+
+  const visibleSections = baseTilesets
+    .map((ts) => {
+      const filteredTiles = inStockOnly
+        ? ts.tiles.filter((tile) => {
+            const stock = stockByTileKey.get(tileStockKey(ts.id, tile.tileId));
+            return (stock?.remaining ?? 0) > 0;
+          })
+        : ts.tiles;
+      return { tileset: ts, tiles: filteredTiles };
+    })
+    .filter((section) => !inStockOnly || section.tiles.length > 0);
 
   const handleFaceClick = (tilesetId: string, tileId: string, face: TileFace) => {
     const isSame =
@@ -86,7 +105,7 @@ export function TilePalette({
         </button>
       </div>
 
-      <div className="border-b border-[#2e2a26] px-2.5 py-2">
+      <div className="space-y-2 border-b border-[#2e2a26] px-2.5 py-2">
         <div className="flex flex-wrap gap-1" role="tablist" aria-label="Tileset filter">
           <button
             type="button"
@@ -119,6 +138,16 @@ export function TilePalette({
             </button>
           ))}
         </div>
+
+        <label className="flex cursor-pointer items-center justify-between rounded-md bg-[#1c1917] px-2.5 py-1.5 text-xs text-stone-300 hover:bg-stone-800/70">
+          <span>In-stock only</span>
+          <input
+            type="checkbox"
+            checked={inStockOnly}
+            onChange={onToggleInStockOnly}
+            className="h-3.5 w-3.5 accent-amber-500"
+          />
+        </label>
       </div>
 
       <div className="rb-scroll flex-1 overflow-y-auto px-2.5 py-2.5">
@@ -129,24 +158,29 @@ export function TilePalette({
           </div>
         )}
 
-        {!bundleError && visibleTilesets.length === 0 && (
+        {!bundleError && visibleSections.length === 0 && (
           <div className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-4 text-center text-xs text-stone-400">
-            No Tilesets found.
+            {inStockOnly ? 'No in-stock Tiles remaining in this filter.' : 'No Tilesets found.'}
           </div>
         )}
 
         <div className="space-y-4">
-          {visibleTilesets.map((tileset) => (
+          {visibleSections.map(({ tileset, tiles }) => (
             <section key={tileset.id} aria-label={tileset.name}>
               <div className="mb-2 flex items-center justify-between px-0.5">
                 <h3 className="text-xs font-semibold tracking-wide text-stone-300 uppercase">
                   {tileset.name}
                 </h3>
-                <span className="text-[11px] text-stone-500">{tileset.tiles.length} Tiles</span>
+                <span className="text-[11px] text-stone-500">{tiles.length} Tiles</span>
               </div>
 
               <div className="grid grid-cols-1 gap-2">
-                {tileset.tiles.map((tile) => {
+                {tiles.map((tile) => {
+                  const stock = stockByTileKey.get(tileStockKey(tileset.id, tile.tileId));
+                  const remaining = stock?.remaining ?? 0;
+                  const isDepletedOrOver = remaining <= 0;
+                  const isOver = remaining < 0;
+
                   const isFaceAActive =
                     activeBrush?.tilesetId === tileset.id &&
                     activeBrush.tileId === tile.tileId &&
@@ -160,17 +194,37 @@ export function TilePalette({
                   return (
                     <div
                       key={tile.tileId}
-                      className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-2"
+                      className={`rounded-lg border p-2 transition-colors ${
+                        isOver
+                          ? 'border-red-500/50 bg-[#1c1917]'
+                          : 'border-[#2e2a26] bg-[#1c1917]'
+                      }`}
                     >
-                      <div className="mb-1.5 flex items-center justify-between text-[11px]">
-                        <span className="font-mono font-medium text-stone-300">
-                          {tileset.shortCode} {tile.isSymmetric ? `#${tile.faceA.label}` : `${tile.faceA.label}/${tile.faceB.label}`}
-                        </span>
-                        {tile.isSymmetric && (
-                          <span className="rounded bg-stone-800 px-1.5 py-0.5 text-[10px] text-stone-400">
-                            Symmetric
+                      <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono font-medium text-stone-300">
+                            {tileset.shortCode}{' '}
+                            {tile.isSymmetric
+                              ? `#${tile.faceA.label}`
+                              : `${tile.faceA.label}/${tile.faceB.label}`}
                           </span>
-                        )}
+                          {tile.isSymmetric && (
+                            <span className="rounded bg-stone-800 px-1.5 py-0.5 text-[10px] text-stone-400">
+                              Dark
+                            </span>
+                          )}
+                        </div>
+
+                        <span
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold ${
+                            isDepletedOrOver
+                              ? 'border border-red-500/40 bg-red-950/60 text-red-300'
+                              : 'border border-[#2e2a26] bg-[#161412] text-stone-300'
+                          }`}
+                        >
+                          {isOver && <AlertTriangle className="h-3 w-3 text-red-400" />}
+                          {remaining} left
+                        </span>
                       </div>
 
                       <div className={`grid gap-2 ${tile.isSymmetric ? 'grid-cols-1' : 'grid-cols-2'}`}>

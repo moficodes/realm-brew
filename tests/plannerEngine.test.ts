@@ -1,8 +1,39 @@
 import { describe, expect, it } from 'vitest';
-import { placeTile } from '../src/domain/plannerEngine';
-import type { Placement } from '../src/domain/types';
+import { computeStock, placeTile } from '../src/domain/plannerEngine';
+import type { Collection, Placement, Tileset } from '../src/domain/types';
 
-describe('Planner engine placement (Seam 2)', () => {
+function makeTestTileset(id: string, shortCode: string): Tileset {
+  return {
+    id,
+    name: id,
+    shortCode,
+    tiles: [
+      {
+        tileId: '01-02',
+        tilesetId: id,
+        isSymmetric: false,
+        faceA: { faceNumber: 1, label: '01', filename: `${id}_01.png`, url: `/api/assets/${id}/01.png` },
+        faceB: { faceNumber: 2, label: '02', filename: `${id}_02.png`, url: `/api/assets/${id}/02.png` },
+      },
+      {
+        tileId: '03-04',
+        tilesetId: id,
+        isSymmetric: false,
+        faceA: { faceNumber: 3, label: '03', filename: `${id}_03.png`, url: `/api/assets/${id}/03.png` },
+        faceB: { faceNumber: 4, label: '04', filename: `${id}_04.png`, url: `/api/assets/${id}/04.png` },
+      },
+      {
+        tileId: '37-37',
+        tilesetId: id,
+        isSymmetric: true,
+        faceA: { faceNumber: 37, label: '37', filename: `${id}_37.png`, url: `/api/assets/${id}/37.png` },
+        faceB: { faceNumber: 37, label: '37', filename: `${id}_37.png`, url: `/api/assets/${id}/37.png` },
+      },
+    ],
+  };
+}
+
+describe('Planner engine placement & inventory (Seam 2)', () => {
   it('places a new Placement at an empty hex coordinate', () => {
     const placements = placeTile([], {
       q: 1,
@@ -46,5 +77,75 @@ describe('Planner engine placement (Seam 2)', () => {
       faceNumber: 6,
       rotation: 4,
     });
+  });
+
+  it('tracks shared physical Tile stock across Side A & Side B and soft-warns when exceeding Collection', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const collection: Collection = { 'man-hewn-dungeons': 2 };
+
+    let placements: Placement[] = [];
+    placements = placeTile(placements, { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 });
+    let stock = computeStock(placements, [mhd], collection);
+    expect(stock.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
+      owned: 2,
+      used: 1,
+      remaining: 1,
+      isOverBudget: false,
+    });
+
+    placements = placeTile(placements, { q: 1, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 });
+    stock = computeStock(placements, [mhd], collection);
+    expect(stock.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
+      owned: 2,
+      used: 2,
+      remaining: 0,
+      isOverBudget: false,
+    });
+    expect(stock.overBudgetCoords.size).toBe(0);
+
+    // 3rd placement uses Face 02 of the same physical Tile -> remaining becomes -1 & flags placements
+    placements = placeTile(placements, { q: 2, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 2, rotation: 0 });
+    stock = computeStock(placements, [mhd], collection);
+    expect(stock.byTileKey.get('man-hewn-dungeons:01-02')).toMatchObject({
+      owned: 2,
+      used: 3,
+      remaining: -1,
+      isOverBudget: true,
+    });
+    expect(stock.overBudgetCoords.has('0,0')).toBe(true);
+    expect(stock.overBudgetCoords.has('1,0')).toBe(true);
+    expect(stock.overBudgetCoords.has('2,0')).toBe(true);
+  });
+
+  it('restores old physical Tile stock on replace and isolates _37 per Tileset and 0-copy digital-only sets', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const sr = makeTestTileset('subterranean-rivers', 'SR');
+    const collection: Collection = { 'man-hewn-dungeons': 2, 'subterranean-rivers': 0 };
+
+    let placements: Placement[] = [
+      { q: 0, r: 0, tilesetId: mhd.id, tileId: '37-37', faceNumber: 37, rotation: 0 },
+      { q: 1, r: 0, tilesetId: sr.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
+    ];
+    let stock = computeStock(placements, [mhd, sr], collection);
+
+    // _37 is strictly isolated per Tileset
+    expect(stock.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(1);
+    expect(stock.byTileKey.get('subterranean-rivers:37-37')?.remaining).toBe(0);
+
+    // 0-copy digital-only Tileset soft-warns on first placement
+    expect(stock.byTileKey.get('subterranean-rivers:01-02')).toMatchObject({
+      owned: 0,
+      used: 1,
+      remaining: -1,
+      isOverBudget: true,
+    });
+    expect(stock.overBudgetCoords.has('1,0')).toBe(true);
+    expect(stock.overBudgetCoords.has('0,0')).toBe(false);
+
+    // Replacing (0,0) with 03-04 restores 37-37 back to 2
+    placements = placeTile(placements, { q: 0, r: 0, tilesetId: mhd.id, tileId: '03-04', faceNumber: 3, rotation: 0 });
+    stock = computeStock(placements, [mhd, sr], collection);
+    expect(stock.byTileKey.get('man-hewn-dungeons:37-37')?.remaining).toBe(2);
+    expect(stock.byTileKey.get('man-hewn-dungeons:03-04')?.remaining).toBe(1);
   });
 });

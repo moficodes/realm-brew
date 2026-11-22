@@ -1,4 +1,4 @@
-import { Grid3x3, Hexagon, Maximize2, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { AlertTriangle, Grid3x3, Hexagon, Maximize2, Package, X, ZoomIn, ZoomOut } from 'lucide-react';
 import type { BrushSelection, Tileset } from '../domain/types';
 
 interface ToolbarProps {
@@ -13,6 +13,8 @@ interface ToolbarProps {
   onClearBrush: () => void;
   tilesetsById: ReadonlyMap<string, Tileset>;
   placementCount: number;
+  overBudgetCount: number;
+  onOpenCollection: () => void;
 }
 
 export function Toolbar({
@@ -27,6 +29,8 @@ export function Toolbar({
   onClearBrush,
   tilesetsById,
   placementCount,
+  overBudgetCount,
+  onOpenCollection,
 }: ToolbarProps) {
   const activeTileset = activeBrush ? tilesetsById.get(activeBrush.tilesetId) : undefined;
   const activeLabel = activeBrush
@@ -34,7 +38,7 @@ export function Toolbar({
     : null;
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#2e2a26] bg-[#161412] px-3">
+    <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-[#2e2a26] bg-[#161412] px-3">
       <div className="flex items-center gap-2.5">
         <div className="flex h-7 w-7 items-center justify-center rounded-md bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30">
           <Hexagon className="h-4 w-4" />
@@ -45,6 +49,15 @@ export function Toolbar({
         <span className="rounded bg-[#1c1917] px-2 py-0.5 text-xs text-stone-400">
           {placementCount} {placementCount === 1 ? 'Placement' : 'Placements'}
         </span>
+        {overBudgetCount > 0 && (
+          <span
+            title="Some Placements exceed your physical Collection copy count"
+            className="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-950/50 px-2 py-0.5 text-xs font-medium text-red-300"
+          >
+            <AlertTriangle className="h-3 w-3 text-red-400" />
+            {overBudgetCount} over budget
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-2">
@@ -115,6 +128,15 @@ export function Toolbar({
         >
           <Grid3x3 className="h-3.5 w-3.5" />
           <span>Hex Grid</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenCollection}
+          className="flex items-center gap-1.5 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2.5 py-1.5 text-xs font-medium text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100"
+        >
+          <Package className="h-3.5 w-3.5 text-amber-400" />
+          <span>Collection</span>
         </button>
       </div>
     </header>

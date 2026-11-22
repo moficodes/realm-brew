@@ -172,3 +172,105 @@ describe('Middleware HTTP API (Seam 1 - Tilesets & Assets)', () => {
     expect(body.error).toBeTruthy();
   });
 });
+
+describe('Middleware HTTP API (Seam 1 - Collection Persistence)', () => {
+  const cleanupDirs: string[] = [];
+  const openServers: RunningServer[] = [];
+
+  afterEach(async () => {
+    while (openServers.length > 0) {
+      await openServers.pop()!.close();
+    }
+    while (cleanupDirs.length > 0) {
+      fs.rmSync(cleanupDirs.pop()!, { recursive: true, force: true });
+    }
+  });
+
+  it('bootstraps newly discovered Tilesets to 2 copies and persists PUT updates to collection.json', async () => {
+    const bundleDir = makeTempDir('rb-bundle-');
+    const dataDir = makeTempDir('rb-data-');
+    cleanupDirs.push(bundleDir, dataDir);
+
+    populateTilesetFolder(bundleDir, '0 • Realm Brew - Man Hewn Dungeons Tiles', 'MHD', 4);
+    populateTilesetFolder(bundleDir, '0 • Realm Brew Subterranean Rivers - Digital Tiles', 'SR', 2);
+
+    const srv = await startTestServer(bundleDir, dataDir);
+    openServers.push(srv);
+
+    const getInitial = await fetch(`${srv.baseUrl}/api/collection`);
+    expect(getInitial.status).toBe(200);
+    expect(await getInitial.json()).toEqual({
+      collection: {
+        'man-hewn-dungeons': 2,
+        'subterranean-rivers': 2,
+      },
+    });
+
+    const putRes = await fetch(`${srv.baseUrl}/api/collection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        collection: {
+          'man-hewn-dungeons': 1,
+          'subterranean-rivers': 0,
+        },
+      }),
+    });
+    expect(putRes.status).toBe(200);
+    expect(await putRes.json()).toEqual({
+      collection: {
+        'man-hewn-dungeons': 1,
+        'subterranean-rivers': 0,
+      },
+    });
+
+    // Verify plain JSON file exists on disk
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'collection.json'), 'utf8'));
+    expect(onDisk).toEqual({
+      'man-hewn-dungeons': 1,
+      'subterranean-rivers': 0,
+    });
+
+    // Adding a new Tileset later defaults only the new one to 2
+    populateTilesetFolder(bundleDir, '0 • Realm Brew Underdark Caverns - Digital Tiles', 'UC', 2);
+    const getAfterNew = await fetch(`${srv.baseUrl}/api/collection`);
+    expect(await getAfterNew.json()).toEqual({
+      collection: {
+        'man-hewn-dungeons': 1,
+        'subterranean-rivers': 0,
+        'underdark-caverns': 2,
+      },
+    });
+  });
+
+  it('rejects negative, fractional, or malformed Collection payloads with 400', async () => {
+    const bundleDir = makeTempDir('rb-bundle-');
+    const dataDir = makeTempDir('rb-data-');
+    cleanupDirs.push(bundleDir, dataDir);
+    populateTilesetFolder(bundleDir, '0 • Realm Brew - Man Hewn Dungeons Tiles', 'MHD', 2);
+
+    const srv = await startTestServer(bundleDir, dataDir);
+    openServers.push(srv);
+
+    const neg = await fetch(`${srv.baseUrl}/api/collection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ collection: { 'man-hewn-dungeons': -1 } }),
+    });
+    expect(neg.status).toBe(400);
+
+    const floatRes = await fetch(`${srv.baseUrl}/api/collection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ collection: { 'man-hewn-dungeons': 1.5 } }),
+    });
+    expect(floatRes.status).toBe(400);
+
+    const badShape = await fetch(`${srv.baseUrl}/api/collection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ collection: 'nope' }),
+    });
+    expect(badShape.status).toBe(400);
+  });
+});
