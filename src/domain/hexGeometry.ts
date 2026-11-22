@@ -198,3 +198,27 @@ export function computeFitCamera(
     zoom: clampZoom(fitZoom),
   };
 }
+
+export function computeExportBounds(
+  placements: readonly Pick<Placement, 'q' | 'r'>[],
+  paddingWorld = 24,
+  radius = HEX_RADIUS,
+): WorldBounds | null {
+  const bounds = computePlacementsWorldBounds(placements, radius);
+  if (!bounds) return null;
+
+  const minX = bounds.minX - paddingWorld;
+  const minY = bounds.minY - paddingWorld;
+  const maxX = bounds.maxX + paddingWorld;
+  const maxY = bounds.maxY + paddingWorld;
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY,
+    centerX: bounds.centerX,
+    centerY: bounds.centerY,
+  };
+}

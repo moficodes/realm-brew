@@ -6,6 +6,7 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   axialToWorld,
+  computeExportBounds,
   computeFitCamera,
   hexCorners,
   screenToAxial,
@@ -121,5 +122,29 @@ describe('Flat-top hex geometry (Seam 2)', () => {
     // Width of -4..4 centers + 2*HEX_RADIUS = 12*HEX_RADIUS + 2*HEX_RADIUS = 1400 world units
     // Inside 1000 - 80 = 920px -> zoom = 920 / 1400
     expect(spreadFit.zoom).toBeCloseTo(920 / (14 * HEX_RADIUS), 4);
+  });
+
+  it('computes tightly cropped PNG export bounds with padding for empty, single, and multi-Placement Maps', () => {
+    expect(computeExportBounds([], 24, HEX_RADIUS)).toBeNull();
+
+    const single: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 },
+    ];
+    const singleBounds = computeExportBounds(single, 24, HEX_RADIUS)!;
+    expect(singleBounds.minX).toBeCloseTo(-HEX_RADIUS - 24, 6);
+    expect(singleBounds.maxX).toBeCloseTo(HEX_RADIUS + 24, 6);
+    expect(singleBounds.width).toBeCloseTo(HEX_WIDTH + 48, 6);
+    expect(singleBounds.height).toBeCloseTo(HEX_HEIGHT + 48, 6);
+
+    const two: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 },
+      { q: 2, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 0 },
+    ];
+    const twoBounds = computeExportBounds(two, 30, HEX_RADIUS)!;
+    // q=0 center y=0 (top -0.5*H), q=2 center y=1*H (bottom 1.5*H) -> height = 2*H + 60
+    expect(twoBounds.minX).toBeCloseTo(-130, 6);
+    expect(twoBounds.maxX).toBeCloseTo(430, 6);
+    expect(twoBounds.width).toBeCloseTo(560, 6);
+    expect(twoBounds.height).toBeCloseTo(HEX_HEIGHT * 2 + 60, 6);
   });
 });

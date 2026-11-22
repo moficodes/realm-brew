@@ -4,6 +4,7 @@ import {
   Eraser,
   Grid3x3,
   Hexagon,
+  ImageDown,
   Maximize2,
   Package,
   Redo2,
@@ -49,6 +50,7 @@ interface ToolbarProps {
   onRedo: () => void;
   onRequestClearMap: () => void;
   onOpenCollection: () => void;
+  onOpenPngExport: () => void;
 }
 
 export function Toolbar({
@@ -84,6 +86,7 @@ export function Toolbar({
   onRedo,
   onRequestClearMap,
   onOpenCollection,
+  onOpenPngExport,
 }: ToolbarProps) {
   const activeTileset = activeBrush ? tilesetsById.get(activeBrush.tilesetId) : undefined;
   const activeLabel = activeBrush
@@ -257,6 +260,21 @@ export function Toolbar({
         >
           <Package className="h-3.5 w-3.5 text-amber-400" />
           <span>Collection</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenPngExport}
+          disabled={placementCount === 0}
+          title={
+            placementCount === 0
+              ? 'Place at least one Tile before exporting PNG'
+              : 'Export tightly cropped PNG'
+          }
+          className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1.5 text-xs font-medium text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ImageDown className="h-3.5 w-3.5 text-amber-400" />
+          <span>PNG</span>
         </button>
 
         <button

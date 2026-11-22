@@ -10,9 +10,11 @@ import {
   saveCollection,
   saveMap,
 } from './api/client';
+import { exportMapAsPng } from './canvas/pngExporter';
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { PngExportDialog } from './components/PngExportDialog';
 import { PullListPanel } from './components/PullListPanel';
 import { TilePalette } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
@@ -95,6 +97,7 @@ export function App() {
   const [camera, setCamera] = useState<Camera>(DEFAULT_CAMERA);
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
   const [collectionDialogOpen, setCollectionDialogOpen] = useState(false);
+  const [pngExportOpen, setPngExportOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [deleteMapConfirmOpen, setDeleteMapConfirmOpen] = useState(false);
 
@@ -582,6 +585,7 @@ export function App() {
         onRedo={handleRedo}
         onRequestClearMap={() => setClearConfirmOpen(true)}
         onOpenCollection={() => setCollectionDialogOpen(true)}
+        onOpenPngExport={() => setPngExportOpen(true)}
       />
 
       {appBannerError && (
@@ -654,6 +658,24 @@ export function App() {
         tilesets={tilesets}
         collection={collection}
         onChangeCopies={handleChangeCopies}
+      />
+
+      <PngExportDialog
+        open={pngExportOpen}
+        onClose={() => setPngExportOpen(false)}
+        mapName={activeMap?.name ?? 'Untitled Map'}
+        placementCount={placements.length}
+        defaultIncludeLabels={showLabels}
+        onExport={async ({ background, includeLabels }) => {
+          await exportMapAsPng({
+            mapName: activeMap?.name ?? 'Untitled Map',
+            placements,
+            tilesetsById,
+            overBudgetCoords: stock.overBudgetCoords,
+            background,
+            includeLabels,
+          });
+        }}
       />
 
       <ConfirmDialog
