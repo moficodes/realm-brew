@@ -1,11 +1,14 @@
-import { axialKey } from './hexGeometry';
+import { axialKey, clampOffsetToUnitHex, normalizeRotationDeg } from './hexGeometry';
 import {
+  DEFAULT_OVERLAY_PACK_COPIES,
   DEFAULT_TILESET_COPIES,
   padFaceNumber,
   type AxialCoord,
   type BrushSelection,
   type Collection,
   type MapDocument,
+  type MapSummary,
+  type OverlayPlacement,
   type Placement,
   type PlacementKey,
   type RotationStep,
@@ -14,7 +17,7 @@ import {
   type Tileset,
 } from './types';
 
-export { DEFAULT_TILESET_COPIES };
+export { DEFAULT_OVERLAY_PACK_COPIES, DEFAULT_TILESET_COPIES };
 
 export interface TileAvailability {
   tilesetId: string;
@@ -209,7 +212,7 @@ export function computeCollectionUsage(
   const byTileKey = new Map<string, TileAvailability>();
 
   for (const tileset of tilesets) {
-    const owned = collection[tileset.id] ?? DEFAULT_TILESET_COPIES;
+    const owned = collection.tilesets[tileset.id] ?? DEFAULT_TILESET_COPIES;
     for (const tile of tileset.tiles) {
       const key = tileCollectionKey(tileset.id, tile.tileId);
       const used = usedCounts.get(key) ?? 0;
@@ -236,10 +239,185 @@ export function computeCollectionUsage(
   return { byTileKey, overBudgetCoords };
 }
 
+function validateCountMap(input: unknown): Record<string, number> | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null;
+  }
+  const result: Record<string, number> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!key || typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      return null;
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+export function validateCollection(input: unknown): Collection | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null;
+  }
+  const obj = input as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  if (
+    obj.version !== 2 ||
+    !keys.every((k) => k === 'version' || k === 'tilesets' || k === 'overlayPacks')
+  ) {
+    return null;
+  }
+  const tilesets = validateCountMap(obj.tilesets);
+  const overlayPacks = validateCountMap(obj.overlayPacks);
+  if (!tilesets || !overlayPacks) {
+    return null;
+  }
+  return {
+    version: 2,
+    tilesets,
+    overlayPacks,
+  };
+}
+
+export function normalizeCollection(input: unknown): Collection | null {
+  const structured = validateCollection(input);
+  if (structured) {
+    return structured;
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null;
+  }
+  const obj = input as Record<string, unknown>;
+  if ('version' in obj || 'tilesets' in obj || 'overlayPacks' in obj) {
+    return null;
+  }
+  const flatTilesets = validateCountMap(obj);
+  if (!flatTilesets) {
+    return null;
+  }
+  return {
+    version: 2,
+    tilesets: flatTilesets,
+    overlayPacks: {},
+  };
+}
+
+export function mergeCollectionDefaults(
+  stored: Collection,
+  discoveredTilesetIds: readonly string[],
+  discoveredOverlayPackIds: readonly string[],
+): Collection {
+  const tilesets: Record<string, number> = { ...stored.tilesets };
+  for (const id of discoveredTilesetIds) {
+    if (!(id in tilesets)) {
+      tilesets[id] = DEFAULT_TILESET_COPIES;
+    }
+  }
+
+  const overlayPacks: Record<string, number> = { ...stored.overlayPacks };
+  for (const id of discoveredOverlayPackIds) {
+    if (!(id in overlayPacks)) {
+      overlayPacks[id] = DEFAULT_OVERLAY_PACK_COPIES;
+    }
+  }
+
+  return {
+    version: 2,
+    tilesets,
+    overlayPacks,
+  };
+}
+
+export function compactPlacement(placement: Placement): Placement {
+  const out: Placement = {
+    q: placement.q === 0 ? 0 : placement.q,
+    r: placement.r === 0 ? 0 : placement.r,
+    tilesetId: placement.tilesetId,
+    tileId: placement.tileId,
+    faceNumber: placement.faceNumber,
+    rotation: placement.rotation,
+  };
+  if (placement.covered) {
+    out.covered = true;
+  }
+  if (placement.overlays && placement.overlays.length > 0) {
+    out.overlays = placement.overlays.map((ov) => ({ ...ov }));
+  }
+  return out;
+}
+
+export function countMapOverlays(placements: readonly Placement[]): number {
+  return placements.reduce((sum, p) => sum + (p.overlays?.length ?? 0), 0);
+}
+
+export function toMapSummary(doc: MapDocument): MapSummary {
+  return {
+    id: doc.id,
+    name: doc.name,
+    placementCount: doc.placements.length,
+    overlayCount: countMapOverlays(doc.placements),
+    updatedAt: doc.updatedAt,
+  };
+}
+
+export function formatMapSummaryCounts(placementCount: number, overlayCount: number): string {
+  const tileLabel = `${placementCount} ${placementCount === 1 ? 'Tile' : 'Tiles'}`;
+  if (overlayCount <= 0) {
+    return tileLabel;
+  }
+  const overlayLabel = `${overlayCount} ${overlayCount === 1 ? 'Overlay' : 'Overlays'}`;
+  return `${tileLabel} · ${overlayLabel}`;
+}
+
+function validateOverlayPlacements(
+  input: unknown,
+  seenOverlayIds: Set<string>,
+): OverlayPlacement[] | null {
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) return null;
+
+  const overlays: OverlayPlacement[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const raw = item as Record<string, unknown>;
+    if (
+      typeof raw.id !== 'string' ||
+      raw.id.trim().length === 0 ||
+      typeof raw.overlayPackId !== 'string' ||
+      raw.overlayPackId.trim().length === 0 ||
+      typeof raw.overlayId !== 'string' ||
+      raw.overlayId.trim().length === 0 ||
+      typeof raw.offsetX !== 'number' ||
+      !Number.isFinite(raw.offsetX) ||
+      typeof raw.offsetY !== 'number' ||
+      !Number.isFinite(raw.offsetY) ||
+      typeof raw.rotationDeg !== 'number' ||
+      !Number.isFinite(raw.rotationDeg)
+    ) {
+      return null;
+    }
+
+    if (seenOverlayIds.has(raw.id)) {
+      return null;
+    }
+    seenOverlayIds.add(raw.id);
+
+    const clamped = clampOffsetToUnitHex(raw.offsetX, raw.offsetY);
+    overlays.push({
+      id: raw.id,
+      overlayPackId: raw.overlayPackId,
+      overlayId: raw.overlayId,
+      offsetX: clamped.offsetX,
+      offsetY: clamped.offsetY,
+      rotationDeg: normalizeRotationDeg(raw.rotationDeg),
+    });
+  }
+  return overlays;
+}
+
 export function validatePlacements(input: unknown): Placement[] | null {
   if (!Array.isArray(input)) return null;
   const result: Placement[] = [];
   const seenCoords = new Set<PlacementKey>();
+  const seenOverlayIds = new Set<string>();
 
   for (const item of input) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
@@ -259,8 +437,14 @@ export function validatePlacements(input: unknown): Placement[] | null {
       typeof raw.rotation !== 'number' ||
       !Number.isInteger(raw.rotation) ||
       raw.rotation < 0 ||
-      raw.rotation > 5
+      raw.rotation > 5 ||
+      (raw.covered !== undefined && typeof raw.covered !== 'boolean')
     ) {
+      return null;
+    }
+
+    const overlays = validateOverlayPlacements(raw.overlays, seenOverlayIds);
+    if (!overlays) {
       return null;
     }
 
@@ -279,6 +463,8 @@ export function validatePlacements(input: unknown): Placement[] | null {
       tileId: raw.tileId,
       faceNumber: raw.faceNumber,
       rotation: raw.rotation as RotationStep,
+      covered: Boolean(raw.covered),
+      overlays,
     });
   }
   return result;
@@ -301,8 +487,8 @@ export function validateAndParseMapJson(raw: string): MapJsonParseResult {
   }
 
   const obj = parsed as Record<string, unknown>;
-  if (obj.version !== 1) {
-    return { ok: false, error: 'Unsupported or missing Map version (expected version: 1).' };
+  if (obj.version !== 1 && obj.version !== 2) {
+    return { ok: false, error: 'Unsupported or missing Map version (expected version: 1 or 2).' };
   }
   if (typeof obj.name !== 'string' || obj.name.trim().length === 0) {
     return { ok: false, error: 'Map JSON is missing a valid name.' };
@@ -321,7 +507,7 @@ export function validateAndParseMapJson(raw: string): MapJsonParseResult {
   return {
     ok: true,
     map: {
-      version: 1,
+      version: 2,
       id,
       name: obj.name.trim(),
       createdAt,
@@ -470,7 +656,7 @@ export function computePullList(
 
   const groups: PullListGroup[] = [];
   for (const tileset of tilesets) {
-    const owned = collection[tileset.id] ?? DEFAULT_TILESET_COPIES;
+    const owned = collection.tilesets[tileset.id] ?? DEFAULT_TILESET_COPIES;
     const items: PullListItem[] = [];
     let totalNeeded = 0;
 

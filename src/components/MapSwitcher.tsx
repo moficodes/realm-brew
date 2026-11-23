@@ -1,5 +1,6 @@
 import { Check, Download, FilePlus2, Pencil, Trash2, Upload, X } from 'lucide-react';
 import { useRef, useState } from 'react';
+import { formatMapSummaryCounts } from '../domain/plannerEngine';
 import type { MapSummary } from '../domain/types';
 
 interface MapSwitcherProps {
@@ -100,11 +101,11 @@ export function MapSwitcher({
             value={activeMapId ?? ''}
             onChange={(e) => onSelectMap(e.target.value)}
             disabled={maps.length === 0}
-            className="h-6 max-w-44 bg-transparent px-1.5 text-xs font-medium text-stone-100 focus:outline-none"
+            className="h-6 max-w-60 bg-transparent px-1.5 text-xs font-medium text-stone-100 focus:outline-none"
           >
             {maps.map((m) => (
               <option key={m.id} value={m.id} className="bg-[#1c1917] text-stone-100">
-                {m.name} ({m.placementCount})
+                {m.name} ({formatMapSummaryCounts(m.placementCount, m.overlayCount)})
               </option>
             ))}
           </select>

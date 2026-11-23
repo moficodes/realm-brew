@@ -1,33 +1,27 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { validatePlacements } from '../domain/plannerEngine';
 import {
-  DEFAULT_TILESET_COPIES,
+  compactPlacement,
+  countMapOverlays,
+  mergeCollectionDefaults,
+  normalizeCollection,
+  validateCollection,
+  validatePlacements,
+} from '../domain/plannerEngine';
+import {
   type Collection,
   type MapDocument,
   type MapSummary,
   type Placement,
 } from '../domain/types';
 
+export { validateCollection };
+
 const SAFE_MAP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 export function isSafeMapId(id: string): boolean {
   return SAFE_MAP_ID_RE.test(id);
-}
-
-export function validateCollection(input: unknown): Collection | null {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return null;
-  }
-  const result: Collection = {};
-  for (const [key, value] of Object.entries(input)) {
-    if (!key || typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
-      return null;
-    }
-    result[key] = value;
-  }
-  return result;
 }
 
 function collectionFilePath(dataDir: string): string {
@@ -42,29 +36,27 @@ function mapFilePath(dataDir: string, id: string): string {
   return path.join(mapsDirPath(dataDir), `${id}.json`);
 }
 
-export function readCollection(dataDir: string, discoveredTilesetIds: readonly string[]): Collection {
+export function readCollection(
+  dataDir: string,
+  discoveredTilesetIds: readonly string[],
+  discoveredOverlayPackIds: readonly string[] = [],
+): Collection {
   const filePath = collectionFilePath(dataDir);
-  let stored: Collection = {};
+  let stored: Collection = { version: 2, tilesets: {}, overlayPacks: {} };
 
   if (fs.existsSync(filePath)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      const validated = validateCollection(parsed);
-      if (validated) {
-        stored = validated;
+      const normalized = normalizeCollection(parsed);
+      if (normalized) {
+        stored = normalized;
       }
     } catch {
-      stored = {};
+      stored = { version: 2, tilesets: {}, overlayPacks: {} };
     }
   }
 
-  const merged: Collection = { ...stored };
-  for (const id of discoveredTilesetIds) {
-    if (!(id in merged)) {
-      merged[id] = DEFAULT_TILESET_COPIES;
-    }
-  }
-  return merged;
+  return mergeCollectionDefaults(stored, discoveredTilesetIds, discoveredOverlayPackIds);
 }
 
 export function writeCollection(dataDir: string, collection: Collection): void {
@@ -92,17 +84,20 @@ export function listMaps(dataDir: string): MapSummary[] {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
     const filePath = path.join(dir, entry.name);
     try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<MapDocument>;
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+      const placements = validatePlacements(parsed.placements);
       if (
+        (parsed.version === 1 || parsed.version === 2) &&
         typeof parsed.id === 'string' &&
         isSafeMapId(parsed.id) &&
         typeof parsed.name === 'string' &&
-        Array.isArray(parsed.placements)
+        placements
       ) {
         summaries.push({
           id: parsed.id,
           name: parsed.name,
-          placementCount: parsed.placements.length,
+          placementCount: placements.length,
+          overlayCount: countMapOverlays(placements),
           updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
         });
       }
@@ -119,10 +114,10 @@ export function readMap(dataDir: string, id: string): MapDocument | null {
   const filePath = mapFilePath(dataDir, id);
   if (!fs.existsSync(filePath)) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<MapDocument>;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
     const placements = validatePlacements(parsed.placements);
     if (
-      parsed.version !== 1 ||
+      (parsed.version !== 1 && parsed.version !== 2) ||
       !placements ||
       typeof parsed.name !== 'string' ||
       typeof parsed.id !== 'string'
@@ -130,7 +125,7 @@ export function readMap(dataDir: string, id: string): MapDocument | null {
       return null;
     }
     return {
-      version: 1,
+      version: 2,
       id: parsed.id,
       name: parsed.name,
       createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : new Date().toISOString(),
@@ -151,15 +146,20 @@ export function createMap(
   const trimmedName = input.name.trim() || 'Untitled Map';
   const id = generateMapId(trimmedName);
   const now = new Date().toISOString();
+  const normalizedPlacements = input.placements ? (validatePlacements(input.placements) ?? []) : [];
   const doc: MapDocument = {
-    version: 1,
+    version: 2,
     id,
     name: trimmedName,
     createdAt: now,
     updatedAt: now,
-    placements: input.placements ? [...input.placements] : [],
+    placements: normalizedPlacements,
   };
-  fs.writeFileSync(mapFilePath(dataDir, id), JSON.stringify(doc, null, 2), 'utf8');
+  const diskDoc: MapDocument = {
+    ...doc,
+    placements: normalizedPlacements.map(compactPlacement),
+  };
+  fs.writeFileSync(mapFilePath(dataDir, id), JSON.stringify(diskDoc, null, 2), 'utf8');
   return doc;
 }
 
@@ -171,15 +171,20 @@ export function updateMap(
   const existing = readMap(dataDir, id);
   if (!existing) return null;
 
+  const normalizedPlacements = validatePlacements(input.placements) ?? [];
   const updated: MapDocument = {
-    version: 1,
+    version: 2,
     id: existing.id,
     name: input.name.trim() || existing.name,
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),
-    placements: [...input.placements],
+    placements: normalizedPlacements,
   };
-  fs.writeFileSync(mapFilePath(dataDir, id), JSON.stringify(updated, null, 2), 'utf8');
+  const diskDoc: MapDocument = {
+    ...updated,
+    placements: normalizedPlacements.map(compactPlacement),
+  };
+  fs.writeFileSync(mapFilePath(dataDir, id), JSON.stringify(diskDoc, null, 2), 'utf8');
   return updated;
 }
 

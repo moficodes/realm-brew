@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { validatePlacements } from '../domain/plannerEngine';
 import type { TilesetListResponse } from '../domain/types';
-import { discoverTilesets } from './bundleDiscovery';
+import { discoverBundle } from './bundleDiscovery';
 import {
   createMap,
   deleteMap,
@@ -62,6 +62,57 @@ async function parseJsonOr400(req: IncomingMessage, res: ServerResponse): Promis
   }
 }
 
+function serveAllowedPngAsset(
+  res: ServerResponse,
+  restPath: string,
+  notFoundLabel: string,
+  resolvePack: (packId: string) => { dirPath: string; files: Map<string, string> } | null,
+): void {
+  const parts = restPath.split('/');
+  if (parts.length !== 2) {
+    sendText(res, 404, notFoundLabel);
+    return;
+  }
+
+  const packId = safeDecode(parts[0]);
+  const filename = safeDecode(parts[1]);
+  if (!packId || !filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+    sendText(res, 404, notFoundLabel);
+    return;
+  }
+
+  const pack = resolvePack(packId);
+  if (!pack) {
+    sendText(res, 404, notFoundLabel);
+    return;
+  }
+
+  const expectedFile = pack.files.get(filename);
+  if (!expectedFile) {
+    sendText(res, 404, notFoundLabel);
+    return;
+  }
+
+  const resolvedBase = path.resolve(pack.dirPath);
+  const resolvedFile = path.resolve(expectedFile);
+  if (!resolvedFile.startsWith(resolvedBase + path.sep) || !fs.existsSync(resolvedFile)) {
+    sendText(res, 404, notFoundLabel);
+    return;
+  }
+
+  const stat = fs.statSync(resolvedFile);
+  if (!stat.isFile()) {
+    sendText(res, 404, notFoundLabel);
+    return;
+  }
+
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'image/png');
+  res.setHeader('Content-Length', String(stat.size));
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  fs.createReadStream(resolvedFile).pipe(res);
+}
+
 async function handleApiRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -73,13 +124,20 @@ async function handleApiRequest(
   const pathname = url.pathname;
 
   if (method === 'GET' && pathname === '/api/tilesets') {
-    const discovery = discoverTilesets(options.bundleDir);
+    const discovery = discoverBundle(options.bundleDir);
     const response: TilesetListResponse = {
       tilesets: discovery.tilesets.map(({ id, name, shortCode, tiles }) => ({
         id,
         name,
         shortCode,
         tiles,
+      })),
+      overlayPacks: discovery.overlayPacks.map(({ id, name, shortCode, pairedTilesetId, overlays }) => ({
+        id,
+        name,
+        shortCode,
+        pairedTilesetId,
+        overlays,
       })),
       bundleConfigured: discovery.bundleConfigured,
       ...(discovery.error ? { error: discovery.error } : {}),
@@ -89,60 +147,39 @@ async function handleApiRequest(
   }
 
   if (method === 'GET' && pathname.startsWith('/api/assets/')) {
-    const rest = pathname.slice('/api/assets/'.length);
-    const parts = rest.split('/');
-    if (parts.length !== 2) {
-      sendText(res, 404, 'Asset not found');
-      return;
-    }
+    const discovery = discoverBundle(options.bundleDir);
+    serveAllowedPngAsset(res, pathname.slice('/api/assets/'.length), 'Asset not found', (tilesetId) => {
+      const tileset = discovery.tilesets.find((t) => t.id === tilesetId);
+      return tileset ? { dirPath: tileset.dirPath, files: tileset.faceFiles } : null;
+    });
+    return;
+  }
 
-    const tilesetId = safeDecode(parts[0]);
-    const filename = safeDecode(parts[1]);
-    if (!tilesetId || !filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
-      sendText(res, 404, 'Asset not found');
-      return;
-    }
-
-    const discovery = discoverTilesets(options.bundleDir);
-    const tileset = discovery.tilesets.find((t) => t.id === tilesetId);
-    if (!tileset) {
-      sendText(res, 404, 'Tileset not found');
-      return;
-    }
-
-    const expectedFile = tileset.faceFiles.get(filename);
-    if (!expectedFile) {
-      sendText(res, 404, 'Tile face not found');
-      return;
-    }
-
-    const resolvedBase = path.resolve(tileset.dirPath);
-    const resolvedFile = path.resolve(expectedFile);
-    if (!resolvedFile.startsWith(resolvedBase + path.sep) || !fs.existsSync(resolvedFile)) {
-      sendText(res, 404, 'Asset not found');
-      return;
-    }
-
-    const stat = fs.statSync(resolvedFile);
-    if (!stat.isFile()) {
-      sendText(res, 404, 'Asset not found');
-      return;
-    }
-
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Content-Length', String(stat.size));
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    fs.createReadStream(resolvedFile).pipe(res);
+  if (method === 'GET' && pathname.startsWith('/api/overlay-assets/')) {
+    const discovery = discoverBundle(options.bundleDir);
+    serveAllowedPngAsset(
+      res,
+      pathname.slice('/api/overlay-assets/'.length),
+      'Overlay asset not found',
+      (packId) => {
+        const pack = discovery.overlayPacks.find((p) => p.id === packId);
+        return pack ? { dirPath: pack.dirPath, files: pack.overlayFiles } : null;
+      },
+    );
     return;
   }
 
   if (pathname === '/api/collection') {
-    const discovery = discoverTilesets(options.bundleDir);
-    const discoveredIds = discovery.tilesets.map((t) => t.id);
+    const discovery = discoverBundle(options.bundleDir);
+    const discoveredTilesetIds = discovery.tilesets.map((t) => t.id);
+    const discoveredOverlayPackIds = discovery.overlayPacks.map((p) => p.id);
 
     if (method === 'GET') {
-      const collection = readCollection(options.dataDir, discoveredIds);
+      const collection = readCollection(
+        options.dataDir,
+        discoveredTilesetIds,
+        discoveredOverlayPackIds,
+      );
       sendJson(res, 200, { collection });
       return;
     }
@@ -157,12 +194,17 @@ async function handleApiRequest(
       const validated = validateCollection(rawCollection);
       if (!validated) {
         sendJson(res, 400, {
-          error: 'Collection must be an object mapping Tileset IDs to non-negative integers',
+          error:
+            'Collection must be a v2 object with version: 2, tilesets, and overlayPacks mapping IDs to non-negative integers',
         });
         return;
       }
       writeCollection(options.dataDir, validated);
-      const collection = readCollection(options.dataDir, discoveredIds);
+      const collection = readCollection(
+        options.dataDir,
+        discoveredTilesetIds,
+        discoveredOverlayPackIds,
+      );
       sendJson(res, 200, { collection });
       return;
     }
@@ -182,6 +224,10 @@ async function handleApiRequest(
         return;
       }
       const raw = body as Record<string, unknown>;
+      if (raw.version !== undefined && raw.version !== 1 && raw.version !== 2) {
+        sendJson(res, 400, { error: 'Unsupported Map version' });
+        return;
+      }
       const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'Untitled Map';
       let placements = [] as ReturnType<typeof validatePlacements>;
       if (raw.placements !== undefined) {
@@ -225,6 +271,10 @@ async function handleApiRequest(
         return;
       }
       const raw = body as Record<string, unknown>;
+      if (raw.version !== undefined && raw.version !== 1 && raw.version !== 2) {
+        sendJson(res, 400, { error: 'Unsupported Map version' });
+        return;
+      }
       if (typeof raw.name !== 'string' || raw.name.trim().length === 0) {
         sendJson(res, 400, { error: 'Map name is required' });
         return;

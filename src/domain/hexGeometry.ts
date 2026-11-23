@@ -85,6 +85,51 @@ export function rotationToRadians(rotation: RotationStep): number {
   return rotation * (Math.PI / 3);
 }
 
+const SQRT3 = Math.sqrt(3);
+const UNIT_HEX_APOTHEM = SQRT3 / 2;
+
+export function normalizeRotationDeg(deg: number): number {
+  const mod = deg % 360;
+  const normalized = mod < 0 ? mod + 360 : mod;
+  if (normalized >= 360 || normalized === 0) {
+    return 0;
+  }
+  return normalized;
+}
+
+export function clampOffsetToUnitHex(
+  offsetX: number,
+  offsetY: number,
+): { offsetX: number; offsetY: number } {
+  const absX = Math.abs(offsetX);
+  const absY = Math.abs(offsetY);
+  const maxAbs = Math.max(absX, absY);
+  if (maxAbs > 1e100) {
+    const nx = offsetX / maxAbs;
+    const ny = offsetY / maxAbs;
+    const t = Math.max(Math.abs(ny) / UNIT_HEX_APOTHEM, Math.abs(nx) + Math.abs(ny) / SQRT3);
+    return {
+      offsetX: normalizeZero(nx / t),
+      offsetY: normalizeZero(ny / t),
+    };
+  }
+
+  const t1 = absY / UNIT_HEX_APOTHEM;
+  const t2 = absX + absY / SQRT3;
+  const t = Math.max(t1, t2);
+  if (t > 1) {
+    return {
+      offsetX: normalizeZero(offsetX / t),
+      offsetY: normalizeZero(offsetY / t),
+    };
+  }
+
+  return {
+    offsetX: normalizeZero(offsetX),
+    offsetY: normalizeZero(offsetY),
+  };
+}
+
 export function clampZoom(zoom: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
 }

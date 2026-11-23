@@ -1,4 +1,5 @@
 export const DEFAULT_TILESET_COPIES = 2;
+export const DEFAULT_OVERLAY_PACK_COPIES = 2;
 
 export type RotationStep = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -29,10 +30,36 @@ export interface Tileset {
   tiles: Tile[];
 }
 
+export interface Overlay {
+  overlayId: string;
+  overlayPackId: string;
+  label: string;
+  filename: string;
+  url: string;
+}
+
+export interface OverlayPack {
+  id: string;
+  name: string;
+  shortCode: string;
+  pairedTilesetId: string | null;
+  overlays: Overlay[];
+}
+
 export interface TilesetListResponse {
   tilesets: Tileset[];
+  overlayPacks: OverlayPack[];
   bundleConfigured: boolean;
   error?: string;
+}
+
+export interface OverlayPlacement {
+  id: string;
+  overlayPackId: string;
+  overlayId: string;
+  offsetX: number;
+  offsetY: number;
+  rotationDeg: number;
 }
 
 export interface Placement {
@@ -42,12 +69,14 @@ export interface Placement {
   tileId: string;
   faceNumber: number;
   rotation: RotationStep;
+  covered?: boolean;
+  overlays?: OverlayPlacement[];
 }
 
 export type PlacementKey = `${number},${number}`;
 
 export interface MapDocument {
-  version: 1;
+  version: 2;
   id: string;
   name: string;
   createdAt: string;
@@ -59,10 +88,15 @@ export interface MapSummary {
   id: string;
   name: string;
   placementCount: number;
+  overlayCount: number;
   updatedAt: string;
 }
 
-export type Collection = Record<string, number>;
+export interface Collection {
+  version: 2;
+  tilesets: Record<string, number>;
+  overlayPacks: Record<string, number>;
+}
 
 export interface BrushSelection {
   tilesetId: string;

@@ -12,7 +12,7 @@ import {
 } from './api/client';
 import { exportMapAsPng } from './canvas/pngExporter';
 import { CanvasViewport } from './components/CanvasViewport';
-import { CollectionDialog } from './components/CollectionDialog';
+import { CollectionDialog, type CollectionPackKind } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { PngExportDialog } from './components/PngExportDialog';
 import { PullListPanel } from './components/PullListPanel';
@@ -27,6 +27,7 @@ import {
 import {
   clearMap,
   commitHistory,
+  compactPlacement,
   computeCollectionUsage,
   computePullList,
   createHistory,
@@ -39,6 +40,7 @@ import {
   removePlacement,
   rotatePlacement,
   rotateStep,
+  toMapSummary,
   undoHistory,
   validateAndParseMapJson,
   type HistoryState,
@@ -49,6 +51,7 @@ import type {
   Collection,
   MapDocument,
   MapSummary,
+  OverlayPack,
   Placement,
   Tileset,
 } from './domain/types';
@@ -56,7 +59,12 @@ import { downloadBlob, isEditableTarget, slugifyFilename } from './utils/browser
 
 export function App() {
   const [tilesets, setTilesets] = useState<Tileset[]>([]);
-  const [collection, setCollection] = useState<Collection>({});
+  const [overlayPacks, setOverlayPacks] = useState<OverlayPack[]>([]);
+  const [collection, setCollection] = useState<Collection>({
+    version: 2,
+    tilesets: {},
+    overlayPacks: {},
+  });
   const [bundleError, setBundleError] = useState<string | undefined>();
   const [appBannerError, setAppBannerError] = useState<string | null>(null);
 
@@ -101,18 +109,8 @@ export function App() {
       setSaveStatus('saving');
       try {
         const updated = await saveMap(payload.id, payload.name, payload.placements);
-        setMaps((prev) =>
-          prev.map((m) =>
-            m.id === updated.id
-              ? {
-                  id: updated.id,
-                  name: updated.name,
-                  placementCount: updated.placements.length,
-                  updatedAt: updated.updatedAt,
-                }
-              : m,
-          ),
-        );
+        const summary = toMapSummary(updated);
+        setMaps((prev) => prev.map((m) => (m.id === updated.id ? summary : m)));
         setSaveStatus('saved');
       } catch {
         setSaveStatus('error');
@@ -158,20 +156,14 @@ export function App() {
       .then(async ([tilesetList, col, mapList]) => {
         if (cancelled) return;
         setTilesets(tilesetList.tilesets);
+        setOverlayPacks(tilesetList.overlayPacks);
         setBundleError(tilesetList.bundleConfigured ? undefined : tilesetList.error);
         setCollection(col);
 
         if (mapList.length === 0) {
           const initial = await createMap('Untitled Map', []);
           if (cancelled) return;
-          setMaps([
-            {
-              id: initial.id,
-              name: initial.name,
-              placementCount: 0,
-              updatedAt: initial.updatedAt,
-            },
-          ]);
+          setMaps([toMapSummary(initial)]);
           setActiveMap(initial);
           setHistory(createHistory(initial.placements));
           setSaveStatus('saved');
@@ -267,15 +259,7 @@ export function App() {
     try {
       const nextNum = maps.length + 1;
       const created = await createMap(`Map ${nextNum}`, []);
-      setMaps((prev) => [
-        {
-          id: created.id,
-          name: created.name,
-          placementCount: 0,
-          updatedAt: created.updatedAt,
-        },
-        ...prev,
-      ]);
+      setMaps((prev) => [toMapSummary(created), ...prev]);
       loadMapIntoEditor(created);
     } catch (err) {
       setAppBannerError(err instanceof Error ? err.message : 'Failed to create Map');
@@ -311,14 +295,7 @@ export function App() {
       const remaining = maps.filter((m) => m.id !== deletedId);
       if (remaining.length === 0) {
         const fresh = await createMap('Untitled Map', []);
-        setMaps([
-          {
-            id: fresh.id,
-            name: fresh.name,
-            placementCount: 0,
-            updatedAt: fresh.updatedAt,
-          },
-        ]);
+        setMaps([toMapSummary(fresh)]);
         loadMapIntoEditor(fresh);
       } else {
         setMaps(remaining);
@@ -335,12 +312,12 @@ export function App() {
     if (!currentMap) return;
     await flushPendingSave();
     const doc: MapDocument = {
-      version: 1,
+      version: 2,
       id: currentMap.id,
       name: currentMap.name,
       createdAt: currentMap.createdAt,
       updatedAt: new Date().toISOString(),
-      placements: historyRef.current.present,
+      placements: historyRef.current.present.map(compactPlacement),
     };
     const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
     downloadBlob(blob, `${slugifyFilename(currentMap.name)}.realm-brew.json`);
@@ -357,15 +334,7 @@ export function App() {
         }
         await flushPendingSave();
         const created = await createMap(parsed.map.name, parsed.map.placements);
-        setMaps((prev) => [
-          {
-            id: created.id,
-            name: created.name,
-            placementCount: created.placements.length,
-            updatedAt: created.updatedAt,
-          },
-          ...prev,
-        ]);
+        setMaps((prev) => [toMapSummary(created), ...prev]);
         loadMapIntoEditor(created);
         setAppBannerError(null);
       } catch (err) {
@@ -533,8 +502,12 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleFlipAction, handleRedo, handleRemoveAt, handleRotateAction, handleUndo, selectedCoord]);
 
-  const handleChangeCopies = (tilesetId: string, copies: number) => {
-    const next: Collection = { ...collectionRef.current, [tilesetId]: copies };
+  const handleChangeCopies = (kind: CollectionPackKind, id: string, copies: number) => {
+    const prev = collectionRef.current;
+    const next: Collection =
+      kind === 'tileset'
+        ? { ...prev, version: 2, tilesets: { ...prev.tilesets, [id]: copies } }
+        : { ...prev, version: 2, overlayPacks: { ...prev.overlayPacks, [id]: copies } };
     collectionRef.current = next;
     setCollection(next);
     const seq = ++collectionSaveSeqRef.current;
@@ -666,6 +639,7 @@ export function App() {
         open={collectionDialogOpen}
         onClose={() => setCollectionDialogOpen(false)}
         tilesets={tilesets}
+        overlayPacks={overlayPacks}
         collection={collection}
         onChangeCopies={handleChangeCopies}
       />

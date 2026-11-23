@@ -3,22 +3,29 @@ import {
   canFlipTarget,
   clearMap,
   commitHistory,
+  compactPlacement,
   computeCollectionUsage,
   computePullList,
   createHistory,
   flipBrush,
   flipPlacement,
   formatAssemblyLabel,
+  formatMapSummaryCounts,
   formatPullListText,
+  mergeCollectionDefaults,
   moveOrSwapPlacement,
+  normalizeCollection,
   placeTile,
   redoHistory,
   removePlacement,
   resolvePlacementAsset,
   rotatePlacement,
   rotateStep,
+  toMapSummary,
   undoHistory,
   validateAndParseMapJson,
+  validateCollection,
+  validatePlacements,
 } from '../src/domain/plannerEngine';
 import type { BrushSelection, Collection, Placement, Tileset } from '../src/domain/types';
 
@@ -101,7 +108,7 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
 
   it('tracks shared physical Tile availability across Side A & Side B and soft-warns when exceeding Collection', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
-    const collection: Collection = { 'man-hewn-dungeons': 2 };
+    const collection: Collection = { version: 2, tilesets: { 'man-hewn-dungeons': 2 }, overlayPacks: {} };
 
     let placements: Placement[] = [];
     placements = placeTile(placements, { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 });
@@ -140,7 +147,11 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
   it('restores old physical Tile availability on replace, isolates _37 per Tileset, and ignores missing assets in over-budget flags', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
     const sr = makeTestTileset('subterranean-rivers', 'SR');
-    const collection: Collection = { 'man-hewn-dungeons': 2, 'subterranean-rivers': 0 };
+    const collection: Collection = {
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 2, 'subterranean-rivers': 0 },
+      overlayPacks: {},
+    };
 
     let placements: Placement[] = [
       { q: 0, r: 0, tilesetId: mhd.id, tileId: '37-37', faceNumber: 37, rotation: 0 },
@@ -188,7 +199,7 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
 
   it('flips between Side A and Side B with zero net stock change and leaves symmetric Tiles unchanged', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
-    const collection: Collection = { 'man-hewn-dungeons': 2 };
+    const collection: Collection = { version: 2, tilesets: { 'man-hewn-dungeons': 2 }, overlayPacks: {} };
 
     const initial: Placement[] = [
       { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 2 },
@@ -325,7 +336,7 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
 
   it('evaluates Collection availability independently per active Map', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
-    const collection: Collection = { 'man-hewn-dungeons': 2 };
+    const collection: Collection = { version: 2, tilesets: { 'man-hewn-dungeons': 2 }, overlayPacks: {} };
 
     const mapA: Placement[] = [
       { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
@@ -344,7 +355,11 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
   it('derives grouped Pull List with Face breakdowns, symmetric _37, over-budget flags, missing assets, and text export', () => {
     const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
     const sr = makeTestTileset('subterranean-rivers', 'SR');
-    const collection: Collection = { 'man-hewn-dungeons': 2, 'subterranean-rivers': 2 };
+    const collection: Collection = {
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 2, 'subterranean-rivers': 2 },
+      overlayPacks: {},
+    };
 
     const placements: Placement[] = [
       { q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 },
@@ -400,5 +415,285 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
     expect(text).toContain('#02 x2');
     expect(text).toContain('OVER BUDGET');
     expect(text).toContain('lost-pack #09');
+  });
+
+  it('validates v2 Collection payloads, auto-migrates flat v1 collections, and merges defaults while preserving unknown keys', () => {
+    expect(
+      validateCollection({
+        version: 2,
+        tilesets: { 'man-hewn-dungeons': 0 },
+        overlayPacks: { 'alchemists-workshop': 3 },
+      }),
+    ).toEqual({
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 0 },
+      overlayPacks: { 'alchemists-workshop': 3 },
+    });
+
+    expect(validateCollection({ 'man-hewn-dungeons': 2 })).toBeNull();
+    expect(validateCollection({ version: 2, tilesets: { a: -1 }, overlayPacks: {} })).toBeNull();
+    expect(validateCollection({ version: 2, tilesets: {}, overlayPacks: { b: 1.25 } })).toBeNull();
+    expect(validateCollection({ version: 2, tilesets: {} })).toBeNull();
+    expect(validateCollection({ version: 1, tilesets: {}, overlayPacks: {} })).toBeNull();
+
+    const migrated = normalizeCollection({ 'man-hewn-dungeons': 1, 'absent-set': 5 });
+    expect(migrated).toEqual({
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 1, 'absent-set': 5 },
+      overlayPacks: {},
+    });
+    expect(normalizeCollection({ version: 2 })).toBeNull();
+
+    const merged = mergeCollectionDefaults(
+      {
+        version: 2,
+        tilesets: { 'man-hewn-dungeons': 1, 'absent-set': 5 },
+        overlayPacks: { 'absent-pack': 4 },
+      },
+      ['man-hewn-dungeons', 'underdark-caverns'],
+      ['alchemists-workshop', 'red-dragons-lair'],
+    );
+    expect(merged).toEqual({
+      version: 2,
+      tilesets: {
+        'man-hewn-dungeons': 1,
+        'absent-set': 5,
+        'underdark-caverns': 2,
+      },
+      overlayPacks: {
+        'absent-pack': 4,
+        'alchemists-workshop': 2,
+        'red-dragons-lair': 2,
+      },
+    });
+  });
+
+  it('auto-normalizes v1 Maps to v2, clamps/wraps Overlay geometry, compacts defaults, and strictly rejects invalid v2 fields', () => {
+    const v1Parsed = validateAndParseMapJson(
+      JSON.stringify({
+        version: 1,
+        name: 'Legacy Map',
+        placements: [
+          { q: 0, r: 0, tilesetId: 'man-hewn-dungeons', tileId: '01-02', faceNumber: 1, rotation: 0 },
+        ],
+      }),
+    );
+    expect(v1Parsed.ok).toBe(true);
+    if (v1Parsed.ok) {
+      expect(v1Parsed.map.version).toBe(2);
+      expect(v1Parsed.map.placements[0]).toEqual({
+        q: 0,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: false,
+        overlays: [],
+      });
+      expect(compactPlacement(v1Parsed.map.placements[0])).toEqual({
+        q: 0,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+      });
+      expect('covered' in compactPlacement(v1Parsed.map.placements[0])).toBe(false);
+      expect('overlays' in compactPlacement(v1Parsed.map.placements[0])).toBe(false);
+    }
+
+    const v2Parsed = validateAndParseMapJson(
+      JSON.stringify({
+        version: 2,
+        name: 'V2 Crypt',
+        placements: [
+          {
+            q: 0,
+            r: 0,
+            tilesetId: 'man-hewn-dungeons',
+            tileId: '01-02',
+            faceNumber: 1,
+            rotation: 2,
+            covered: true,
+            overlays: [
+              {
+                id: 'ov-1',
+                overlayPackId: 'alchemists-workshop',
+                overlayId: 'table-1',
+                offsetX: 2,
+                offsetY: 0,
+                rotationDeg: -45,
+              },
+              {
+                id: 'ov-2',
+                overlayPackId: 'alchemists-workshop',
+                overlayId: 'door-1',
+                offsetX: 0.1,
+                offsetY: -0.2,
+                rotationDeg: 725,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(v2Parsed.ok).toBe(true);
+    if (v2Parsed.ok) {
+      expect(v2Parsed.map.version).toBe(2);
+      expect(v2Parsed.map.placements[0].covered).toBe(true);
+      expect(v2Parsed.map.placements[0].overlays).toEqual([
+        {
+          id: 'ov-1',
+          overlayPackId: 'alchemists-workshop',
+          overlayId: 'table-1',
+          offsetX: 1,
+          offsetY: 0,
+          rotationDeg: 315,
+        },
+        {
+          id: 'ov-2',
+          overlayPackId: 'alchemists-workshop',
+          overlayId: 'door-1',
+          offsetX: 0.1,
+          offsetY: -0.2,
+          rotationDeg: 5,
+        },
+      ]);
+      expect(compactPlacement(v2Parsed.map.placements[0])).toMatchObject({
+        covered: true,
+        overlays: v2Parsed.map.placements[0].overlays,
+      });
+    }
+
+    // Reject malformed covered / overlays
+    expect(
+      validateAndParseMapJson(
+        JSON.stringify({
+          version: 2,
+          name: 'Bad Covered',
+          placements: [
+            { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0, covered: 'yes' },
+          ],
+        }),
+      ),
+    ).toMatchObject({ ok: false });
+
+    expect(
+      validateAndParseMapJson(
+        JSON.stringify({
+          version: 2,
+          name: 'Bad Overlays',
+          placements: [
+            { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0, overlays: {} },
+          ],
+        }),
+      ),
+    ).toMatchObject({ ok: false });
+
+    // Reject empty IDs
+    expect(
+      validatePlacements([
+        {
+          q: 0,
+          r: 0,
+          tilesetId: 'mhd',
+          tileId: '01-02',
+          faceNumber: 1,
+          rotation: 0,
+          overlays: [
+            { id: '  ', overlayPackId: 'aw', overlayId: 'door-1', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          ],
+        },
+      ]),
+    ).toBeNull();
+
+    // Reject duplicate OverlayPlacement.id across different host Placements
+    expect(
+      validateAndParseMapJson(
+        JSON.stringify({
+          version: 2,
+          name: 'Dup Overlay ID',
+          placements: [
+            {
+              q: 0,
+              r: 0,
+              tilesetId: 'mhd',
+              tileId: '01-02',
+              faceNumber: 1,
+              rotation: 0,
+              overlays: [
+                { id: 'dup-id', overlayPackId: 'aw', overlayId: 'door-1', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+              ],
+            },
+            {
+              q: 1,
+              r: 0,
+              tilesetId: 'mhd',
+              tileId: '03-04',
+              faceNumber: 3,
+              rotation: 0,
+              overlays: [
+                { id: 'dup-id', overlayPackId: 'aw', overlayId: 'door-2', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+              ],
+            },
+          ],
+        }),
+      ),
+    ).toMatchObject({ ok: false });
+
+    // Reject non-finite numeric fields
+    expect(
+      validatePlacements([
+        {
+          q: 0,
+          r: 0,
+          tilesetId: 'mhd',
+          tileId: '01-02',
+          faceNumber: 1,
+          rotation: 0,
+          overlays: [
+            { id: 'ov-nan', overlayPackId: 'aw', overlayId: 'door-1', offsetX: Number.NaN, offsetY: 0, rotationDeg: 0 },
+          ],
+        },
+      ]),
+    ).toBeNull();
+
+    expect(
+      validatePlacements([
+        {
+          q: 0,
+          r: 0,
+          tilesetId: 'mhd',
+          tileId: '01-02',
+          faceNumber: 1,
+          rotation: 0,
+          overlays: [
+            {
+              id: 'ov-inf',
+              overlayPackId: 'aw',
+              overlayId: 'door-1',
+              offsetX: 0,
+              offsetY: 0,
+              rotationDeg: Number.POSITIVE_INFINITY,
+            },
+          ],
+        },
+      ]),
+    ).toBeNull();
+
+    expect(formatMapSummaryCounts(0, 0)).toBe('0 Tiles');
+    expect(formatMapSummaryCounts(1, 0)).toBe('1 Tile');
+    expect(formatMapSummaryCounts(3, 1)).toBe('3 Tiles · 1 Overlay');
+    expect(formatMapSummaryCounts(3, 4)).toBe('3 Tiles · 4 Overlays');
+    if (v2Parsed.ok) {
+      expect(toMapSummary(v2Parsed.map)).toEqual({
+        id: v2Parsed.map.id,
+        name: 'V2 Crypt',
+        placementCount: 1,
+        overlayCount: 2,
+        updatedAt: v2Parsed.map.updatedAt,
+      });
+    }
   });
 });

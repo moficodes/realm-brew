@@ -6,9 +6,11 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   axialToWorld,
+  clampOffsetToUnitHex,
   computeExportBounds,
   computeFitCamera,
   hexCorners,
+  normalizeRotationDeg,
   screenToAxial,
   screenToWorld,
   worldToAxial,
@@ -146,5 +148,38 @@ describe('Flat-top hex geometry (Seam 2)', () => {
     expect(twoBounds.maxX).toBeCloseTo(430, 6);
     expect(twoBounds.width).toBeCloseTo(560, 6);
     expect(twoBounds.height).toBeCloseTo(HEX_HEIGHT * 2 + 60, 6);
+  });
+
+  it('clamps finite offsets inside the unit flat-top hex and wraps finite rotationDeg into [0, 360)', () => {
+    const apothem = Math.sqrt(3) / 2;
+
+    expect(clampOffsetToUnitHex(0, 0)).toEqual({ offsetX: 0, offsetY: 0 });
+    expect(clampOffsetToUnitHex(0.25, -0.3)).toEqual({ offsetX: 0.25, offsetY: -0.3 });
+
+    const negZero = clampOffsetToUnitHex(-0, -0);
+    expect(Object.is(negZero.offsetX, -0)).toBe(false);
+    expect(Object.is(negZero.offsetY, -0)).toBe(false);
+
+    expect(clampOffsetToUnitHex(2, 0)).toEqual({ offsetX: 1, offsetY: 0 });
+    expect(clampOffsetToUnitHex(-3, 0)).toEqual({ offsetX: -1, offsetY: 0 });
+
+    const topClamped = clampOffsetToUnitHex(0, 2);
+    expect(topClamped.offsetX).toBe(0);
+    expect(topClamped.offsetY).toBeCloseTo(apothem, 10);
+
+    const diag = clampOffsetToUnitHex(0.8, 0.8);
+    expect(Math.abs(diag.offsetX) + Math.abs(diag.offsetY) / Math.sqrt(3)).toBeCloseTo(1, 10);
+    expect(Math.abs(diag.offsetY)).toBeLessThanOrEqual(apothem + 1e-12);
+
+    expect(clampOffsetToUnitHex(1e308, 0)).toEqual({ offsetX: 1, offsetY: 0 });
+
+    expect(normalizeRotationDeg(0)).toBe(0);
+    expect(Object.is(normalizeRotationDeg(-0), -0)).toBe(false);
+    expect(normalizeRotationDeg(360)).toBe(0);
+    expect(normalizeRotationDeg(725)).toBe(5);
+    expect(normalizeRotationDeg(-45)).toBe(315);
+    expect(normalizeRotationDeg(-360)).toBe(0);
+    expect(normalizeRotationDeg(-1e-17)).toBe(0);
+    expect(normalizeRotationDeg(359.5)).toBe(359.5);
   });
 });
