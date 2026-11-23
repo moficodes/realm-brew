@@ -12,13 +12,17 @@ import {
   type Point2D,
 } from '../domain/hexGeometry';
 import {
+  MIN_OVERLAY_HIT_SIZE,
   MISSING_OVERLAY_HEIGHT,
   MISSING_OVERLAY_WIDTH,
   clampWorldPointToHostHex,
+  getOverlayDialGeometry,
   getOverlayWorldSize,
   overlayLocalToWorld,
+  type OverlayHit,
 } from '../domain/overlayGeometry';
 import {
+  findOverlayById,
   findPlacementAt,
   formatAssemblyLabel,
   resolveOverlayAsset,
@@ -48,6 +52,26 @@ export interface DragMovePreview {
   to: AxialCoord | null;
 }
 
+export interface OverlayDragPreview {
+  fromHostCoord: AxialCoord;
+  overlayId: string;
+  overlay: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'>;
+  worldX: number;
+  worldY: number;
+  worldDeg: number;
+  worldRad: number;
+  targetHostCoord: AxialCoord;
+  reparenting: boolean;
+  hoveredEmptyCoord: AxialCoord | null;
+}
+
+export interface OverlayRotationPreview {
+  hostCoord: AxialCoord;
+  overlayId: string;
+  worldDeg: number;
+  source: 'dial' | 'slider';
+}
+
 export interface ViewportRenderParams {
   ctx: CanvasRenderingContext2D;
   width: number;
@@ -62,9 +86,14 @@ export interface ViewportRenderParams {
   hoveredCoord: AxialCoord | null;
   hoveredWorldPos?: Point2D | null;
   selectedCoord: AxialCoord | null;
+  focusedOverlayId?: string | null;
+  hoveredOverlayHit?: OverlayHit | null;
+  hoveredInspectorOverlayId?: string | null;
   activeBrush: ActiveBrush | null;
   overBudgetCoords: ReadonlySet<PlacementKey>;
   dragMove: DragMovePreview | null;
+  overlayDrag?: OverlayDragPreview | null;
+  overlayRotationPreview?: OverlayRotationPreview | null;
 }
 
 export function traceHexPath(
@@ -417,6 +446,23 @@ function drawOverlayPlacementGraphic(
   ctx.restore();
 }
 
+/** Resolve the rendered world dimensions of an Overlay Placement (1:1 image or 72x44 fallback). */
+export function resolveOverlayRenderWorldSize(
+  overlay: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'>,
+  overlayPacksById: ReadonlyMap<string, OverlayPack>,
+  imageCache: ImageLookup,
+): { width: number; height: number } {
+  const asset = resolveOverlayAsset(overlay, overlayPacksById);
+  if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
+    return getOverlayWorldSize(null);
+  }
+  const img = imageCache.get(asset.url);
+  if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+    return getOverlayWorldSize(null);
+  }
+  return getOverlayWorldSize({ width: img.naturalWidth, height: img.naturalHeight });
+}
+
 /** Pass 3: Render all Overlay Placements globally above all Tiles in deterministic host/stack order. */
 export function drawGlobalOverlaysPass(params: {
   ctx: CanvasRenderingContext2D;
@@ -424,8 +470,18 @@ export function drawGlobalOverlaysPass(params: {
   overlayPacksById: ReadonlyMap<string, OverlayPack>;
   imageCache: ImageLookup;
   dragMove?: DragMovePreview | null;
+  skipOverlayId?: string | null;
+  overlayRotationPreview?: OverlayRotationPreview | null;
 }): void {
-  const { ctx, placements, overlayPacksById, imageCache, dragMove = null } = params;
+  const {
+    ctx,
+    placements,
+    overlayPacksById,
+    imageCache,
+    dragMove = null,
+    skipOverlayId = null,
+    overlayRotationPreview = null,
+  } = params;
 
   for (const host of placements) {
     const isDragOrigin =
@@ -436,8 +492,15 @@ export function drawGlobalOverlaysPass(params: {
 
     const alpha = isDragOrigin ? 0.28 : 1;
     for (const ov of host.overlays ?? []) {
+      if (skipOverlayId && ov.id === skipOverlayId) {
+        continue;
+      }
       const t = overlayLocalToWorld(host, ov);
-      drawOverlayPlacementGraphic(ctx, t.x, t.y, t.worldRad, ov, overlayPacksById, imageCache, alpha);
+      const worldRad =
+        overlayRotationPreview && overlayRotationPreview.overlayId === ov.id
+          ? (overlayRotationPreview.worldDeg * Math.PI) / 180
+          : t.worldRad;
+      drawOverlayPlacementGraphic(ctx, t.x, t.y, worldRad, ov, overlayPacksById, imageCache, alpha);
     }
   }
 
@@ -450,11 +513,69 @@ export function drawGlobalOverlaysPass(params: {
         r: dragMove.to.r,
       };
       for (const ov of movingHost.overlays) {
+        if (skipOverlayId && ov.id === skipOverlayId) {
+          continue;
+        }
         const t = overlayLocalToWorld(previewHost, ov);
         drawOverlayPlacementGraphic(ctx, t.x, t.y, t.worldRad, ov, overlayPacksById, imageCache, 0.72);
       }
     }
   }
+}
+
+function drawOverlayOBB(
+  ctx: CanvasRenderingContext2D,
+  wx: number,
+  wy: number,
+  width: number,
+  height: number,
+  worldRad: number,
+  strokeColor: string,
+  lineWidth: number,
+  dashed = false,
+): void {
+  const boxW = Math.max(width, MIN_OVERLAY_HIT_SIZE);
+  const boxH = Math.max(height, MIN_OVERLAY_HIT_SIZE);
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.rotate(worldRad);
+  if (dashed) {
+    ctx.setLineDash([5, 4]);
+  }
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = lineWidth;
+  ctx.strokeRect(-boxW / 2, -boxH / 2, boxW, boxH);
+  ctx.restore();
+}
+
+function drawHostTether(
+  ctx: CanvasRenderingContext2D,
+  hostCoord: AxialCoord,
+  wx: number,
+  wy: number,
+  color: string,
+  zoom: number,
+): void {
+  const hostCenter = axialToWorld(hostCoord.q, hostCoord.r, HEX_RADIUS);
+  ctx.save();
+  ctx.setLineDash([4 / zoom, 4 / zoom]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(1.2, 1.5 / zoom);
+  ctx.beginPath();
+  ctx.moveTo(hostCenter.x, hostCenter.y);
+  ctx.lineTo(wx, wy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(hostCenter.x, hostCenter.y, Math.max(3, 4 / zoom), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(wx, wy, Math.max(2.5, 3 / zoom), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawWorldBadge(
@@ -485,6 +606,35 @@ function drawWorldBadge(
   ctx.textBaseline = 'middle';
   ctx.fillText(text, 0, 0.5);
   ctx.restore();
+}
+
+function drawInvalidEmptyHexFeedback(
+  ctx: CanvasRenderingContext2D,
+  coord: AxialCoord,
+  zoom: number,
+  message: string,
+): void {
+  const hexCenter = axialToWorld(coord.q, coord.r, HEX_RADIUS);
+  ctx.save();
+  traceHexPath(ctx, hexCenter.x, hexCenter.y, HEX_RADIUS - 1.5);
+  ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
+  ctx.fill();
+  ctx.setLineDash([7, 5]);
+  ctx.strokeStyle = 'rgba(239, 68, 68, 0.9)';
+  ctx.lineWidth = Math.max(2, 2.5 / zoom);
+  ctx.stroke();
+  ctx.restore();
+
+  drawWorldBadge(
+    ctx,
+    hexCenter.x,
+    hexCenter.y + 42,
+    message,
+    'rgba(69, 10, 10, 0.92)',
+    'rgba(239, 68, 68, 0.75)',
+    '#fecaca',
+    zoom,
+  );
 }
 
 function drawOverlayBrushGhost(
@@ -540,9 +690,14 @@ export function renderMapViewport({
   hoveredCoord,
   hoveredWorldPos = null,
   selectedCoord,
+  focusedOverlayId = null,
+  hoveredOverlayHit = null,
+  hoveredInspectorOverlayId = null,
   activeBrush,
   overBudgetCoords,
   dragMove,
+  overlayDrag = null,
+  overlayRotationPreview = null,
 }: ViewportRenderParams): void {
   ctx.save();
   ctx.fillStyle = MAP_CANVAS_BG;
@@ -599,21 +754,15 @@ export function renderMapViewport({
     }
   }
 
-  // Pass 3: Global Overlay Placements above all Tiles
-  drawGlobalOverlaysPass({
-    ctx,
-    placements,
-    overlayPacksById,
-    imageCache,
-    dragMove,
-  });
-
+  // Selected host Placement amber outline (drawn beneath Pass 3 Overlays so props stay crisp)
   if (selectedCoord && !dragMove) {
     const selectedPlacement = findPlacementAt(placements, selectedCoord);
     if (selectedPlacement) {
       const { x, y } = axialToWorld(selectedPlacement.q, selectedPlacement.r, HEX_RADIUS);
       ctx.save();
       traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.08)';
+      ctx.fill();
       ctx.strokeStyle = '#f59e0b';
       ctx.lineWidth = Math.max(3, 3.5 / camera.zoom);
       ctx.stroke();
@@ -621,7 +770,188 @@ export function renderMapViewport({
     }
   }
 
-  if (!dragMove) {
+  // Emerald reparent target highlight while dragging an Overlay onto another occupied Placement
+  if (overlayDrag && overlayDrag.reparenting) {
+    const { x, y } = axialToWorld(
+      overlayDrag.targetHostCoord.q,
+      overlayDrag.targetHostCoord.r,
+      HEX_RADIUS,
+    );
+    ctx.save();
+    traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
+    ctx.fillStyle = 'rgba(16, 185, 129, 0.14)';
+    ctx.fill();
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = Math.max(2.5, 3 / camera.zoom);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Pass 3: Global Overlay Placements above all Tiles
+  drawGlobalOverlaysPass({
+    ctx,
+    placements,
+    overlayPacksById,
+    imageCache,
+    dragMove,
+    skipOverlayId: overlayDrag?.overlayId ?? null,
+    overlayRotationPreview,
+  });
+
+  // Inspector hover amber dashed OBB or Canvas hover cyan dashed OBB
+  if (hoveredInspectorOverlayId && !overlayDrag) {
+    const match = findOverlayById(placements, hoveredInspectorOverlayId);
+    if (match) {
+      const t = overlayLocalToWorld(match.host, match.overlay);
+      const worldRad =
+        overlayRotationPreview && overlayRotationPreview.overlayId === match.overlay.id
+          ? (overlayRotationPreview.worldDeg * Math.PI) / 180
+          : t.worldRad;
+      const { width: ow, height: oh } = resolveOverlayRenderWorldSize(
+        match.overlay,
+        overlayPacksById,
+        imageCache,
+      );
+      drawOverlayOBB(ctx, t.x, t.y, ow, oh, worldRad, '#fbbf24', 2 / camera.zoom, true);
+    }
+  } else if (
+    !overlayDrag &&
+    !overlayRotationPreview &&
+    !dragMove &&
+    !activeBrush &&
+    hoveredOverlayHit &&
+    hoveredOverlayHit.overlay.id !== focusedOverlayId
+  ) {
+    drawOverlayOBB(
+      ctx,
+      hoveredOverlayHit.worldX,
+      hoveredOverlayHit.worldY,
+      hoveredOverlayHit.width,
+      hoveredOverlayHit.height,
+      hoveredOverlayHit.worldRad,
+      'rgba(56, 189, 248, 0.7)',
+      1.5 / camera.zoom,
+      true,
+    );
+  }
+
+  // Focused Overlay child: amber tether + cyan OBB + minimal radial dial ring
+  if (focusedOverlayId && !overlayDrag && !dragMove) {
+    const focusedMatch = findOverlayById(placements, focusedOverlayId);
+    if (focusedMatch) {
+      const t = overlayLocalToWorld(focusedMatch.host, focusedMatch.overlay);
+      const worldDeg =
+        overlayRotationPreview && overlayRotationPreview.overlayId === focusedMatch.overlay.id
+          ? overlayRotationPreview.worldDeg
+          : t.worldDeg;
+      const worldRad = (worldDeg * Math.PI) / 180;
+      const { width: ow, height: oh } = resolveOverlayRenderWorldSize(
+        focusedMatch.overlay,
+        overlayPacksById,
+        imageCache,
+      );
+      const dial = getOverlayDialGeometry(t.x, t.y, ow, oh, worldDeg);
+
+      drawHostTether(ctx, focusedMatch.host, t.x, t.y, '#f59e0b', camera.zoom);
+      drawOverlayOBB(ctx, t.x, t.y, ow, oh, worldRad, '#38bdf8', 1.75 / camera.zoom);
+
+      ctx.save();
+      ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+      ctx.lineWidth = 1.5 / camera.zoom;
+      ctx.beginPath();
+      ctx.arc(dial.centerX, dial.centerY, dial.ringRadius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.arc(dial.knobX, dial.knobY, 6 / camera.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = '#0ea5e9';
+      ctx.fill();
+      ctx.strokeStyle = '#f8fafc';
+      ctx.lineWidth = 1.5 / camera.zoom;
+      ctx.stroke();
+      ctx.restore();
+
+      if (
+        overlayRotationPreview &&
+        overlayRotationPreview.overlayId === focusedMatch.overlay.id &&
+        overlayRotationPreview.source === 'dial'
+      ) {
+        drawWorldBadge(
+          ctx,
+          dial.knobX,
+          dial.knobY - 18 / camera.zoom,
+          `${Math.round(dial.worldDeg) % 360}°`,
+          'rgba(12, 74, 110, 0.95)',
+          '#38bdf8',
+          '#e0f2fe',
+          camera.zoom,
+        );
+      }
+    }
+  }
+
+  // Active Overlay drag/reparent preview
+  if (overlayDrag) {
+    drawOverlayPlacementGraphic(
+      ctx,
+      overlayDrag.worldX,
+      overlayDrag.worldY,
+      overlayDrag.worldRad,
+      overlayDrag.overlay,
+      overlayPacksById,
+      imageCache,
+      0.9,
+    );
+    const { width: ow, height: oh } = resolveOverlayRenderWorldSize(
+      overlayDrag.overlay,
+      overlayPacksById,
+      imageCache,
+    );
+    drawHostTether(
+      ctx,
+      overlayDrag.targetHostCoord,
+      overlayDrag.worldX,
+      overlayDrag.worldY,
+      overlayDrag.reparenting ? '#10b981' : '#f59e0b',
+      camera.zoom,
+    );
+    drawOverlayOBB(
+      ctx,
+      overlayDrag.worldX,
+      overlayDrag.worldY,
+      ow,
+      oh,
+      overlayDrag.worldRad,
+      overlayDrag.reparenting ? '#10b981' : '#38bdf8',
+      2 / camera.zoom,
+    );
+
+    if (overlayDrag.reparenting) {
+      drawWorldBadge(
+        ctx,
+        overlayDrag.worldX,
+        overlayDrag.worldY - Math.max(oh, MIN_OVERLAY_HIT_SIZE) / 2 - 18 / camera.zoom,
+        `Reparent to (${overlayDrag.targetHostCoord.q}, ${overlayDrag.targetHostCoord.r})`,
+        'rgba(6, 78, 59, 0.95)',
+        '#10b981',
+        '#d1fae5',
+        camera.zoom,
+      );
+    }
+
+    if (overlayDrag.hoveredEmptyCoord) {
+      drawInvalidEmptyHexFeedback(
+        ctx,
+        overlayDrag.hoveredEmptyCoord,
+        camera.zoom,
+        'Clamped to host hex',
+      );
+    }
+  }
+
+  if (!dragMove && !overlayDrag) {
     if (activeBrush?.kind === 'tile' && hoveredCoord) {
       const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
       drawPlacementGraphic(ctx, x, y, activeBrush, tilesetsById, imageCache, 0.55);
@@ -667,15 +997,7 @@ export function renderMapViewport({
             false,
           );
         } else {
-          ctx.save();
-          traceHexPath(ctx, hexCenter.x, hexCenter.y, HEX_RADIUS - 1.5);
-          ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
-          ctx.fill();
-          ctx.setLineDash([7, 5]);
-          ctx.strokeStyle = 'rgba(239, 68, 68, 0.9)';
-          ctx.lineWidth = Math.max(2, 2.5 / camera.zoom);
-          ctx.stroke();
-          ctx.restore();
+          drawInvalidEmptyHexFeedback(ctx, targetCoord, camera.zoom, 'Place a Tile first');
 
           drawOverlayBrushGhost(
             ctx,
@@ -686,20 +1008,9 @@ export function renderMapViewport({
             0.55,
             true,
           );
-
-          drawWorldBadge(
-            ctx,
-            hexCenter.x,
-            hexCenter.y + 42,
-            'Place a Tile first',
-            'rgba(69, 10, 10, 0.92)',
-            'rgba(239, 68, 68, 0.75)',
-            '#fecaca',
-            camera.zoom,
-          );
         }
       }
-    } else if (hoveredCoord) {
+    } else if (hoveredCoord && !hoveredOverlayHit) {
       const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
       ctx.save();
       traceHexPath(ctx, x, y, HEX_RADIUS - 1);

@@ -355,7 +355,7 @@ export function TilePalette({
         <button
           type="button"
           onClick={onToggleCollapse}
-          title="Expand Palette"
+          title="Expand Palette ([)"
           aria-label="Expand Palette"
           className="flex h-8 w-8 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-800 hover:text-stone-100"
         >
@@ -489,7 +489,7 @@ export function TilePalette({
         <button
           type="button"
           onClick={onToggleCollapse}
-          title="Collapse Palette"
+          title="Collapse Palette ([)"
           aria-label="Collapse Palette"
           className="ml-2 flex h-7 w-7 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-800 hover:text-stone-100"
         >

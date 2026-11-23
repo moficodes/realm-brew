@@ -5,6 +5,7 @@ import {
   attachOverlayAtWorld,
   buildOverlayPaletteSections,
   canFlipTarget,
+  centerOverlayOnHost,
   clearMap,
   commitHistory,
   compactPlacement,
@@ -12,6 +13,8 @@ import {
   computePullList,
   createHistory,
   extractOverlayPrefix,
+  findOverlayById,
+  findOverlayOnHost,
   flipBrush,
   flipPlacement,
   formatActiveBrushLabel,
@@ -20,16 +23,23 @@ import {
   formatPullListText,
   groupOverlaysByPrefix,
   mergeCollectionDefaults,
+  moveOrReparentOverlay,
   moveOrSwapPlacement,
   normalizeCollection,
   overlayCollectionKey,
   placeTile,
+  reconcileSelectionAfterHistory,
   redoHistory,
+  removeOverlay,
   removePlacement,
+  reorderOverlayZ,
   resolveOverlayAsset,
   resolvePlacementAsset,
+  rotateOverlayByDelta,
   rotatePlacement,
   rotateStep,
+  setOverlayLocalRotation,
+  setOverlayWorldRotation,
   sortOverlayPacksPairedFirst,
   toMapSummary,
   undoHistory,
@@ -1233,5 +1243,153 @@ describe('Overlay attach & host-Tile lifecycle engine commands (Seam 2)', () => 
     expect(history.present).toHaveLength(2);
     expect(history.present.find((p) => p.q === 1 && p.r === 0)?.overlays?.[0].id).toBe('ov-a');
     expect(history.present.find((p) => p.q === 0 && p.r === 2)?.overlays?.[0].id).toBe('ov-b');
+  });
+
+  it('moves and reparents Overlays preserving world angle, appends to new host top, reorders z-order, centers, rotates, and deletes atomically with Undo selection reconciliation', () => {
+    const initial: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 1, // +60°
+        overlays: [
+          {
+            id: 'ov-1',
+            overlayPackId: 'missing-pack', // unresolved missing asset remains losslessly editable!
+            overlayId: 'missing-bridge',
+            offsetX: 0.3,
+            offsetY: -0.2,
+            rotationDeg: 25, // world 85°
+          },
+          {
+            id: 'ov-2',
+            overlayPackId: 'man-hewn-dungeons',
+            overlayId: 'door-1',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '03-04',
+        faceNumber: 3,
+        rotation: 4, // +240°
+        overlays: [
+          {
+            id: 'ov-existing',
+            overlayPackId: 'man-hewn-dungeons',
+            overlayId: 'door-1',
+            offsetX: -0.1,
+            offsetY: 0.1,
+            rotationDeg: 10,
+          },
+        ],
+      },
+    ];
+
+    expect(findOverlayById(initial, 'ov-1')?.host).toMatchObject({ q: 0, r: 0 });
+    expect(findOverlayOnHost(initial, { q: 0, r: 0 }, 'ov-2')?.index).toBe(1);
+    expect(findOverlayOnHost(initial, { q: 1, r: 0 }, 'ov-2')).toBeNull();
+
+    // 1. Move within same host (preserves z-order index 0 and local rotationDeg; clamps outside hex)
+    const host0Center = axialToWorld(0, 0, HEX_RADIUS);
+    const sameMove = moveOrReparentOverlay(
+      initial,
+      { q: 0, r: 0 },
+      'ov-1',
+      { q: 0, r: 0 },
+      host0Center.x + 250,
+      host0Center.y,
+    );
+    expect(sameMove.reparented).toBe(false);
+    expect(sameMove.changed).toBe(true);
+    const movedOv1 = sameMove.placements[0].overlays![0];
+    expect(movedOv1.id).toBe('ov-1');
+    expect(movedOv1.rotationDeg).toBe(25);
+    const movedWorld = overlayLocalToWorld(sameMove.placements[0], movedOv1);
+    expect(movedWorld.x).toBeCloseTo(host0Center.x + HEX_RADIUS, 10);
+    expect(movedWorld.y).toBeCloseTo(host0Center.y, 10);
+
+    // No-op move at exact same world position reports changed: false
+    const noopMove = moveOrReparentOverlay(
+      sameMove.placements,
+      { q: 0, r: 0 },
+      'ov-1',
+      { q: 0, r: 0 },
+      movedWorld.x,
+      movedWorld.y,
+    );
+    expect(noopMove.changed).toBe(false);
+
+    // 2. Z-order reorder: move bottom ov-1 up, then back down; boundaries are no-op (same reference)
+    const reorderedUp = reorderOverlayZ(sameMove.placements, { q: 0, r: 0 }, 'ov-1', 'up');
+    expect(reorderedUp[0].overlays!.map((o) => o.id)).toEqual(['ov-2', 'ov-1']);
+    expect(reorderOverlayZ(reorderedUp, { q: 0, r: 0 }, 'ov-1', 'up')).toBe(reorderedUp); // already top
+
+    const reorderedDown = reorderOverlayZ(reorderedUp, { q: 0, r: 0 }, 'ov-1', 'down');
+    expect(reorderedDown[0].overlays!.map((o) => o.id)).toEqual(['ov-1', 'ov-2']);
+    expect(reorderOverlayZ(reorderedDown, { q: 0, r: 0 }, 'ov-1', 'down')).toBe(reorderedDown); // already bottom
+
+    // 3. Center on host & no-op when already centered
+    const centered = centerOverlayOnHost(reorderedDown, { q: 0, r: 0 }, 'ov-1');
+    expect(centered[0].overlays![0]).toMatchObject({ offsetX: 0, offsetY: 0, rotationDeg: 25 });
+    expect(centerOverlayOnHost(centered, { q: 0, r: 0 }, 'ov-1')).toBe(centered);
+
+    // 4. Local, delta, and world rotation + no-op suppression
+    const deltaRotated = rotateOverlayByDelta(centered, { q: 0, r: 0 }, 'ov-1', -40);
+    expect(deltaRotated[0].overlays![0].rotationDeg).toBeCloseTo(345, 10); // (25 - 40) mod 360 = 345
+    const worldRotated = setOverlayWorldRotation(deltaRotated, { q: 0, r: 0 }, 'ov-1', 15);
+    // host rotation = 1 (60°), so local = (15 - 60) mod 360 = 315°
+    expect(worldRotated[0].overlays![0].rotationDeg).toBeCloseTo(315, 10);
+    expect(setOverlayLocalRotation(worldRotated, { q: 0, r: 0 }, 'ov-1', 315)).toBe(worldRotated);
+
+    // 5. Reparent from (0,0) to (1,0): preserves world position & world angle, appends to top of target host stack
+    const host1Center = axialToWorld(1, 0, HEX_RADIUS);
+    const worldBeforeReparent = overlayLocalToWorld(worldRotated[0], worldRotated[0].overlays![0]);
+    let history = createHistory(worldRotated);
+    const reparented = moveOrReparentOverlay(
+      history.present,
+      { q: 0, r: 0 },
+      'ov-1',
+      { q: 1, r: 0 },
+      host1Center.x + 15,
+      host1Center.y - 10,
+    );
+    expect(reparented.reparented).toBe(true);
+    expect(reparented.changed).toBe(true);
+    expect(reparented.placements[0].overlays!.map((o) => o.id)).toEqual(['ov-2']);
+    expect(reparented.placements[1].overlays!.map((o) => o.id)).toEqual(['ov-existing', 'ov-1']);
+    const reparentedOv1 = reparented.placements[1].overlays![1];
+    const worldAfterReparent = overlayLocalToWorld(reparented.placements[1], reparentedOv1);
+    expect(worldAfterReparent.x).toBeCloseTo(host1Center.x + 15, 10);
+    expect(worldAfterReparent.y).toBeCloseTo(host1Center.y - 10, 10);
+    expect(worldAfterReparent.worldDeg).toBeCloseTo(worldBeforeReparent.worldDeg, 10);
+
+    // Undo/Redo reconciles selectedCoord + focusedOverlayId following reparented Overlay across hosts
+    history = commitHistory(history, reparented.placements);
+    let selection = reconcileSelectionAfterHistory(history.present, { q: 1, r: 0 }, 'ov-1');
+    expect(selection).toEqual({ selectedCoord: { q: 1, r: 0 }, focusedOverlayId: 'ov-1' });
+
+    history = undoHistory(history);
+    selection = reconcileSelectionAfterHistory(history.present, selection.selectedCoord, selection.focusedOverlayId);
+    expect(selection).toEqual({ selectedCoord: { q: 0, r: 0 }, focusedOverlayId: 'ov-1' });
+
+    history = redoHistory(history);
+    selection = reconcileSelectionAfterHistory(history.present, selection.selectedCoord, selection.focusedOverlayId);
+    expect(selection).toEqual({ selectedCoord: { q: 1, r: 0 }, focusedOverlayId: 'ov-1' });
+
+    // 6. Focused-Overlay deletion removes only that Overlay, leaving host Placement and sibling intact
+    const afterDelete = removeOverlay(history.present, { q: 1, r: 0 }, 'ov-1');
+    expect(afterDelete[1].overlays!.map((o) => o.id)).toEqual(['ov-existing']);
+    expect(removeOverlay(afterDelete, { q: 1, r: 0 }, 'ov-1')).toBe(afterDelete); // no-op when missing
+    history = commitHistory(history, afterDelete);
+    selection = reconcileSelectionAfterHistory(history.present, { q: 1, r: 0 }, 'ov-1');
+    expect(selection).toEqual({ selectedCoord: { q: 1, r: 0 }, focusedOverlayId: null });
   });
 });

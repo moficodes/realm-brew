@@ -14,8 +14,9 @@ import { exportMapAsPng } from './canvas/pngExporter';
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog, type CollectionPackKind } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import type { OverlayContextMenuState } from './components/OverlayContextMenu';
 import { PngExportDialog } from './components/PngExportDialog';
-import { PullListPanel } from './components/PullListPanel';
+import { RightDrawer, type RightDrawerTab } from './components/RightDrawer';
 import { TilePalette, type PaletteTab } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
 import {
@@ -27,6 +28,7 @@ import {
 } from './domain/hexGeometry';
 import {
   attachOverlayAtWorld,
+  centerOverlayOnHost,
   clearMap,
   commitHistory,
   compactPlacement,
@@ -34,15 +36,23 @@ import {
   computePullList,
   countMapOverlays,
   createHistory,
+  findOverlayById,
   findPlacementAt,
   flipBrush,
   flipPlacement,
+  moveOrReparentOverlay,
   moveOrSwapPlacement,
   placeTile,
+  reconcileSelectionAfterHistory,
   redoHistory,
+  removeOverlay,
   removePlacement,
+  reorderOverlayZ,
+  rotateOverlayByDelta,
   rotatePlacement,
   rotateStep,
+  setOverlayLocalRotation,
+  setOverlayWorldRotation,
   toMapSummary,
   undoHistory,
   validateAndParseMapJson,
@@ -85,10 +95,19 @@ export function App() {
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
-  const [pullListOpen, setPullListOpen] = useState(false);
+  const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
+  const [rightDrawerTab, setRightDrawerTab] = useState<RightDrawerTab>('inspector');
   const [activeBrush, setActiveBrush] = useState<ActiveBrush | null>(null);
   const [draggingBrush, setDraggingBrush] = useState<ActiveBrush | null>(null);
   const [selectedCoord, setSelectedCoord] = useState<AxialCoord | null>(null);
+  const [focusedOverlayId, setFocusedOverlayId] = useState<string | null>(null);
+  const [hoveredInspectorOverlayId, setHoveredInspectorOverlayId] = useState<string | null>(null);
+  const [inspectorRotationPreview, setInspectorRotationPreview] = useState<{
+    hostCoord: AxialCoord;
+    overlayId: string;
+    worldDeg: number;
+  } | null>(null);
+  const [contextMenu, setContextMenu] = useState<OverlayContextMenuState | null>(null);
   const [history, setHistory] = useState<HistoryState<Placement[]>>(() =>
     createHistory<Placement[]>([]),
   );
@@ -107,6 +126,14 @@ export function App() {
   activeMapRef.current = activeMap;
   const collectionRef = useRef(collection);
   collectionRef.current = collection;
+  const selectedCoordRef = useRef(selectedCoord);
+  selectedCoordRef.current = selectedCoord;
+  const focusedOverlayIdRef = useRef(focusedOverlayId);
+  focusedOverlayIdRef.current = focusedOverlayId;
+  const contextMenuRef = useRef(contextMenu);
+  contextMenuRef.current = contextMenu;
+  const activeBrushRef = useRef(activeBrush);
+  activeBrushRef.current = activeBrush;
   const collectionSaveSeqRef = useRef(0);
 
   const saveTimerRef = useRef<number | null>(null);
@@ -241,9 +268,18 @@ export function App() {
     [placements, tilesets, collection],
   );
 
+  const selectedHost = useMemo(
+    () => (selectedCoord ? findPlacementAt(placements, selectedCoord) : undefined),
+    [placements, selectedCoord],
+  );
+
   const commitPlacements = useCallback(
     (updater: (current: Placement[]) => Placement[]) => {
-      const nextPlacements = updater(historyRef.current.present);
+      const currentPlacements = historyRef.current.present;
+      const nextPlacements = updater(currentPlacements);
+      if (nextPlacements === currentPlacements) {
+        return;
+      }
       const nextHistory = commitHistory(historyRef.current, nextPlacements);
       historyRef.current = nextHistory;
       setHistory(nextHistory);
@@ -264,6 +300,10 @@ export function App() {
       setActiveMap(doc);
       setHistory(nextHistory);
       setSelectedCoord(null);
+      setFocusedOverlayId(null);
+      setHoveredInspectorOverlayId(null);
+      setInspectorRotationPreview(null);
+      setContextMenu(null);
       setSaveStatus('saved');
       setCamera(
         doc.placements.length > 0
@@ -382,6 +422,7 @@ export function App() {
     setActiveBrush(brush);
     if (brush) {
       setSelectedCoord(null);
+      setFocusedOverlayId(null);
     }
   }, []);
 
@@ -399,6 +440,7 @@ export function App() {
           rotation: brush.rotation,
         }),
       );
+      setFocusedOverlayId(null);
       if (brushOverride) {
         setActiveBrush(null);
         setSelectedCoord(coord);
@@ -436,64 +478,39 @@ export function App() {
         scheduleAutoSave(currentMap.id, currentMap.name, next);
       }
 
+      setSelectedCoord(coord);
+      setFocusedOverlayId(createdOverlay.id);
       if (brushOverride) {
         setActiveBrush(null);
-        setSelectedCoord(coord);
       }
     },
     [activeBrush, scheduleAutoSave],
   );
 
-  const handleRotateAction = useCallback(
-    (delta: 1 | -1) => {
-      if (activeBrush) {
-        if (activeBrush.kind === 'tile') {
-          setActiveBrush((prev) =>
-            prev && prev.kind === 'tile'
-              ? { ...prev, rotation: rotateStep(prev.rotation, delta) }
-              : prev,
-          );
-        } else {
-          setActiveBrush((prev) =>
-            prev && prev.kind === 'overlay'
-              ? { ...prev, rotationDeg: normalizeRotationDeg(prev.rotationDeg + delta * 60) }
-              : prev,
-          );
-        }
-        return;
-      }
-      if (selectedCoord) {
-        commitPlacements((prev) => rotatePlacement(prev, selectedCoord, delta));
-      }
+  const handleSelectHostOnly = useCallback((coord: AxialCoord | null) => {
+    setSelectedCoord(coord);
+    setFocusedOverlayId(null);
+  }, []);
+
+  const handleSelectOverlay = useCallback((hostCoord: AxialCoord, overlayId: string) => {
+    setSelectedCoord(hostCoord);
+    setFocusedOverlayId(overlayId);
+  }, []);
+
+  const handleFocusOverlayFromContextMenu = useCallback(
+    (hostCoord: AxialCoord, overlayId: string) => {
+      setActiveBrush(null);
+      setSelectedCoord(hostCoord);
+      setFocusedOverlayId(overlayId);
     },
-    [activeBrush, selectedCoord, commitPlacements],
+    [],
   );
 
-  const handleFlipAction = useCallback(() => {
-    if (activeBrush) {
-      if (activeBrush.kind === 'tile') {
-        setActiveBrush((prev) =>
-          prev && prev.kind === 'tile' ? flipBrush(prev, tilesets) : prev,
-        );
-      }
-      return;
-    }
-    if (selectedCoord) {
-      const current = historyRef.current.present;
-      const next = flipPlacement(current, selectedCoord, tilesets);
-      const beforeFace = findPlacementAt(current, selectedCoord)?.faceNumber;
-      const afterFace = findPlacementAt(next, selectedCoord)?.faceNumber;
-      if (beforeFace === afterFace) return;
-
-      const nextHistory = commitHistory(historyRef.current, next);
-      historyRef.current = nextHistory;
-      setHistory(nextHistory);
-      const currentMap = activeMapRef.current;
-      if (currentMap) {
-        scheduleAutoSave(currentMap.id, currentMap.name, next);
-      }
-    }
-  }, [activeBrush, scheduleAutoSave, selectedCoord, tilesets]);
+  const handleSelectHostFromContextMenu = useCallback((coord: AxialCoord) => {
+    setActiveBrush(null);
+    setSelectedCoord(coord);
+    setFocusedOverlayId(null);
+  }, []);
 
   const handleMoveOrSwap = useCallback(
     (from: AxialCoord, to: AxialCoord) => {
@@ -503,13 +520,178 @@ export function App() {
     [commitPlacements],
   );
 
-  const handleRemoveAt = useCallback(
-    (coord: AxialCoord) => {
-      commitPlacements((prev) => removePlacement(prev, coord));
-      setSelectedCoord((cur) => (cur && cur.q === coord.q && cur.r === coord.r ? null : cur));
+  const handleMoveOrReparentOverlay = useCallback(
+    (
+      fromHost: AxialCoord,
+      overlayId: string,
+      targetHost: AxialCoord,
+      worldX: number,
+      worldY: number,
+    ) => {
+      const current = historyRef.current.present;
+      const res = moveOrReparentOverlay(
+        current,
+        fromHost,
+        overlayId,
+        targetHost,
+        worldX,
+        worldY,
+      );
+      if (res.changed) {
+        const nextHistory = commitHistory(historyRef.current, res.placements);
+        historyRef.current = nextHistory;
+        setHistory(nextHistory);
+        const currentMap = activeMapRef.current;
+        if (currentMap) {
+          scheduleAutoSave(currentMap.id, currentMap.name, res.placements);
+        }
+      }
+      setSelectedCoord(targetHost);
+      setFocusedOverlayId(overlayId);
+    },
+    [scheduleAutoSave],
+  );
+
+  const handleSetOverlayWorldRotation = useCallback(
+    (hostCoord: AxialCoord, overlayId: string, worldDeg: number) => {
+      commitPlacements((prev) =>
+        setOverlayWorldRotation(prev, hostCoord, overlayId, worldDeg),
+      );
     },
     [commitPlacements],
   );
+
+  const handleSetOverlayLocalRotation = useCallback(
+    (hostCoord: AxialCoord, overlayId: string, localDeg: number) => {
+      commitPlacements((prev) =>
+        setOverlayLocalRotation(prev, hostCoord, overlayId, localDeg),
+      );
+    },
+    [commitPlacements],
+  );
+
+  const handleRotateOverlayDelta = useCallback(
+    (hostCoord: AxialCoord, overlayId: string, deltaDeg: number) => {
+      commitPlacements((prev) =>
+        rotateOverlayByDelta(prev, hostCoord, overlayId, deltaDeg),
+      );
+    },
+    [commitPlacements],
+  );
+
+  const handleCenterOverlay = useCallback(
+    (hostCoord: AxialCoord, overlayId: string) => {
+      commitPlacements((prev) => centerOverlayOnHost(prev, hostCoord, overlayId));
+    },
+    [commitPlacements],
+  );
+
+  const handleReorderOverlay = useCallback(
+    (hostCoord: AxialCoord, overlayId: string, direction: 'up' | 'down') => {
+      commitPlacements((prev) => reorderOverlayZ(prev, hostCoord, overlayId, direction));
+    },
+    [commitPlacements],
+  );
+
+  const handleRemoveOverlay = useCallback(
+    (hostCoord: AxialCoord, overlayId: string) => {
+      commitPlacements((prev) => removeOverlay(prev, hostCoord, overlayId));
+      if (focusedOverlayIdRef.current === overlayId) {
+        setFocusedOverlayId(null);
+      }
+      setHoveredInspectorOverlayId((cur) => (cur === overlayId ? null : cur));
+    },
+    [commitPlacements],
+  );
+
+  const handleRemoveAt = useCallback(
+    (coord: AxialCoord) => {
+      const removing = findPlacementAt(historyRef.current.present, coord);
+      const removedFocused = Boolean(
+        focusedOverlayIdRef.current &&
+          removing?.overlays?.some((ov) => ov.id === focusedOverlayIdRef.current),
+      );
+      commitPlacements((prev) => removePlacement(prev, coord));
+      setSelectedCoord((cur) => (cur && cur.q === coord.q && cur.r === coord.r ? null : cur));
+      if (removedFocused) {
+        setFocusedOverlayId(null);
+      }
+    },
+    [commitPlacements],
+  );
+
+  const handleRotateHost = useCallback(
+    (coord: AxialCoord, delta: 1 | -1) => {
+      commitPlacements((prev) => rotatePlacement(prev, coord, delta));
+    },
+    [commitPlacements],
+  );
+
+  const handleFlipHost = useCallback(
+    (coord: AxialCoord) => {
+      commitPlacements((prev) => {
+        const beforeFace = findPlacementAt(prev, coord)?.faceNumber;
+        const next = flipPlacement(prev, coord, tilesets);
+        const afterFace = findPlacementAt(next, coord)?.faceNumber;
+        return beforeFace === afterFace ? prev : next;
+      });
+    },
+    [commitPlacements, tilesets],
+  );
+
+  const handleRotateAction = useCallback(
+    (delta: 1 | -1) => {
+      const brush = activeBrushRef.current;
+      if (brush) {
+        if (brush.kind === 'tile') {
+          setActiveBrush((prev) =>
+            prev && prev.kind === 'tile'
+              ? { ...prev, rotation: rotateStep(prev.rotation, delta) }
+              : prev,
+          );
+        } else {
+          setActiveBrush((prev) =>
+            prev && prev.kind === 'overlay'
+              ? { ...prev, rotationDeg: normalizeRotationDeg(prev.rotationDeg + delta * 15) }
+              : prev,
+          );
+        }
+        return;
+      }
+
+      const ovMatch = findOverlayById(historyRef.current.present, focusedOverlayIdRef.current);
+      if (ovMatch) {
+        handleRotateOverlayDelta(ovMatch.host, ovMatch.overlay.id, delta * 15);
+        return;
+      }
+
+      if (selectedCoordRef.current) {
+        handleRotateHost(selectedCoordRef.current, delta);
+      }
+    },
+    [handleRotateHost, handleRotateOverlayDelta],
+  );
+
+  const handleFlipAction = useCallback(() => {
+    const brush = activeBrushRef.current;
+    if (brush) {
+      if (brush.kind === 'tile') {
+        setActiveBrush((prev) =>
+          prev && prev.kind === 'tile' ? flipBrush(prev, tilesets) : prev,
+        );
+      }
+      return;
+    }
+
+    // F flips host Tile only when no child Overlay Placement is focused
+    if (focusedOverlayIdRef.current) {
+      return;
+    }
+
+    if (selectedCoordRef.current) {
+      handleFlipHost(selectedCoordRef.current);
+    }
+  }, [handleFlipHost, tilesets]);
 
   const handleUndo = useCallback(() => {
     const prevHistory = historyRef.current;
@@ -517,7 +699,16 @@ export function App() {
     if (nextHistory === prevHistory) return;
     historyRef.current = nextHistory;
     setHistory(nextHistory);
-    setSelectedCoord(null);
+    setContextMenu(null);
+    setInspectorRotationPreview(null);
+    const reconciled = reconcileSelectionAfterHistory(
+      nextHistory.present,
+      selectedCoordRef.current,
+      focusedOverlayIdRef.current,
+    );
+    setSelectedCoord(reconciled.selectedCoord);
+    setFocusedOverlayId(reconciled.focusedOverlayId);
+
     const currentMap = activeMapRef.current;
     if (currentMap) {
       scheduleAutoSave(currentMap.id, currentMap.name, nextHistory.present);
@@ -530,7 +721,16 @@ export function App() {
     if (nextHistory === prevHistory) return;
     historyRef.current = nextHistory;
     setHistory(nextHistory);
-    setSelectedCoord(null);
+    setContextMenu(null);
+    setInspectorRotationPreview(null);
+    const reconciled = reconcileSelectionAfterHistory(
+      nextHistory.present,
+      selectedCoordRef.current,
+      focusedOverlayIdRef.current,
+    );
+    setSelectedCoord(reconciled.selectedCoord);
+    setFocusedOverlayId(reconciled.focusedOverlayId);
+
     const currentMap = activeMapRef.current;
     if (currentMap) {
       scheduleAutoSave(currentMap.id, currentMap.name, nextHistory.present);
@@ -540,6 +740,10 @@ export function App() {
   const handleConfirmClearMap = useCallback(() => {
     commitPlacements(() => clearMap());
     setSelectedCoord(null);
+    setFocusedOverlayId(null);
+    setHoveredInspectorOverlayId(null);
+    setInspectorRotationPreview(null);
+    setContextMenu(null);
     setClearConfirmOpen(false);
   }, [commitPlacements]);
 
@@ -550,8 +754,15 @@ export function App() {
       }
 
       if (event.key === 'Escape') {
-        setActiveBrush(null);
-        setSelectedCoord(null);
+        if (contextMenuRef.current) {
+          setContextMenu(null);
+        } else if (activeBrushRef.current) {
+          setActiveBrush(null);
+        } else if (focusedOverlayIdRef.current) {
+          setFocusedOverlayId(null);
+        } else if (selectedCoordRef.current) {
+          setSelectedCoord(null);
+        }
         return;
       }
 
@@ -566,6 +777,16 @@ export function App() {
       }
 
       if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (event.key === '[') {
+          event.preventDefault();
+          setPaletteCollapsed((c) => !c);
+          return;
+        }
+        if (event.key === ']') {
+          event.preventDefault();
+          setRightDrawerCollapsed((c) => !c);
+          return;
+        }
         if (event.key.toLowerCase() === 'r') {
           event.preventDefault();
           handleRotateAction(event.shiftKey ? -1 : 1);
@@ -576,16 +797,27 @@ export function App() {
           handleFlipAction();
           return;
         }
-        if ((event.key === 'Delete' || event.key === 'Backspace') && selectedCoord) {
-          event.preventDefault();
-          handleRemoveAt(selectedCoord);
+        if (
+          (event.key === 'Delete' || event.key === 'Backspace') &&
+          !activeBrushRef.current
+        ) {
+          const ovMatch = findOverlayById(historyRef.current.present, focusedOverlayIdRef.current);
+          if (ovMatch) {
+            event.preventDefault();
+            handleRemoveOverlay(ovMatch.host, ovMatch.overlay.id);
+            return;
+          }
+          if (selectedCoordRef.current) {
+            event.preventDefault();
+            handleRemoveAt(selectedCoordRef.current);
+          }
         }
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleFlipAction, handleRedo, handleRemoveAt, handleRotateAction, handleUndo, selectedCoord]);
+  }, [handleFlipAction, handleRedo, handleRemoveAt, handleRemoveOverlay, handleRotateAction, handleUndo]);
 
   const handleChangeCopies = (kind: CollectionPackKind, id: string, copies: number) => {
     const prev = collectionRef.current;
@@ -618,6 +850,28 @@ export function App() {
     setCamera(computeFitCamera(placements, viewportSize.width, viewportSize.height, 56));
   };
 
+  const handleTogglePullListFromToolbar = useCallback(() => {
+    if (rightDrawerCollapsed || rightDrawerTab !== 'pull-list') {
+      setRightDrawerTab('pull-list');
+      setRightDrawerCollapsed(false);
+    } else {
+      setRightDrawerCollapsed(true);
+    }
+  }, [rightDrawerCollapsed, rightDrawerTab]);
+
+  useEffect(() => {
+    if (rightDrawerCollapsed || rightDrawerTab !== 'inspector') {
+      setHoveredInspectorOverlayId(null);
+    }
+  }, [rightDrawerCollapsed, rightDrawerTab]);
+
+  const handleExpandInspector = useCallback(() => {
+    setRightDrawerTab('inspector');
+    setRightDrawerCollapsed(false);
+  }, []);
+
+  const pullListToolbarActive = !rightDrawerCollapsed && rightDrawerTab === 'pull-list';
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-[#161412] text-stone-100">
       <Toolbar
@@ -635,8 +889,8 @@ export function App() {
         onToggleGrid={() => setShowGrid((g) => !g)}
         showLabels={showLabels}
         onToggleLabels={() => setShowLabels((l) => !l)}
-        pullListOpen={pullListOpen}
-        onTogglePullList={() => setPullListOpen((o) => !o)}
+        pullListOpen={pullListToolbarActive}
+        onTogglePullList={handleTogglePullListFromToolbar}
         zoom={camera.zoom}
         onZoomIn={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom * 1.25) }))}
         onZoomOut={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom / 1.25) }))}
@@ -710,6 +964,12 @@ export function App() {
           activeBrush={activeBrush}
           draggingBrush={draggingBrush}
           selectedCoord={selectedCoord}
+          focusedOverlayId={focusedOverlayId}
+          hoveredInspectorOverlayId={hoveredInspectorOverlayId}
+          inspectorRotationPreview={inspectorRotationPreview}
+          rightDrawerCollapsed={rightDrawerCollapsed}
+          contextMenu={contextMenu}
+          onContextMenuChange={setContextMenu}
           overBudgetCoords={collectionUsage.overBudgetCoords}
           showGrid={showGrid}
           showLabels={showLabels}
@@ -720,20 +980,47 @@ export function App() {
           onDropFaceAt={(coord, brush) => handlePlaceAt(coord, brush)}
           onPlaceOverlayAt={(coord, wx, wy) => handlePlaceOverlayAt(coord, wx, wy)}
           onDropOverlayAt={(coord, wx, wy, brush) => handlePlaceOverlayAt(coord, wx, wy, brush)}
-          onSelectCoord={setSelectedCoord}
+          onSelectHostOnly={handleSelectHostOnly}
+          onSelectOverlay={handleSelectOverlay}
+          onFocusOverlayFromContextMenu={handleFocusOverlayFromContextMenu}
+          onSelectHostFromContextMenu={handleSelectHostFromContextMenu}
+          onClearBrush={() => setActiveBrush(null)}
           onMoveOrSwap={handleMoveOrSwap}
-          onRemoveAt={handleRemoveAt}
+          onMoveOrReparentOverlay={handleMoveOrReparentOverlay}
+          onSetOverlayWorldRotation={handleSetOverlayWorldRotation}
+          onRemoveAt={(coord) => handleRemoveAt(coord)}
+          onRemoveOverlayAt={(hostCoord, overlayId) => handleRemoveOverlay(hostCoord, overlayId)}
           onRotateAction={handleRotateAction}
           onFlipAction={handleFlipAction}
+          onExpandInspector={handleExpandInspector}
         />
 
-        {pullListOpen && (
-          <PullListPanel
-            mapName={activeMap?.name ?? 'Untitled Map'}
-            pullList={pullList}
-            onClose={() => setPullListOpen(false)}
-          />
-        )}
+        <RightDrawer
+          collapsed={rightDrawerCollapsed}
+          activeTab={rightDrawerTab}
+          onTabChange={setRightDrawerTab}
+          onToggleCollapse={() => setRightDrawerCollapsed((c) => !c)}
+          onExpandToInspector={handleExpandInspector}
+          mapName={activeMap?.name ?? 'Untitled Map'}
+          pullList={pullList}
+          placements={placements}
+          selectedHost={selectedHost}
+          focusedOverlayId={focusedOverlayId}
+          tilesetsById={tilesetsById}
+          overlayPacksById={overlayPacksById}
+          onSelectHostCoord={handleSelectHostOnly}
+          onFocusOverlayId={setFocusedOverlayId}
+          onHoverOverlayId={setHoveredInspectorOverlayId}
+          onRotateHost={handleRotateHost}
+          onFlipHost={handleFlipHost}
+          onRemoveHost={handleRemoveAt}
+          onReorderOverlay={handleReorderOverlay}
+          onRemoveOverlay={handleRemoveOverlay}
+          onCenterOverlay={handleCenterOverlay}
+          onRotateOverlayDelta={handleRotateOverlayDelta}
+          onSetOverlayLocalRotation={handleSetOverlayLocalRotation}
+          onPreviewOverlayRotation={setInspectorRotationPreview}
+        />
       </main>
 
       <CollectionDialog

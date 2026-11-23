@@ -1,14 +1,13 @@
-import { AlertTriangle, Check, ClipboardList, Copy, X } from 'lucide-react';
+import { AlertTriangle, Check, Copy } from 'lucide-react';
 import { useState } from 'react';
 import { formatPullListText, type PullListSummary } from '../domain/plannerEngine';
 
 interface PullListPanelProps {
   mapName: string;
   pullList: PullListSummary;
-  onClose: () => void;
 }
 
-export function PullListPanel({ mapName, pullList, onClose }: PullListPanelProps) {
+export function PullListPanel({ mapName, pullList }: PullListPanelProps) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
 
   const handleCopy = async () => {
@@ -24,48 +23,36 @@ export function PullListPanel({ mapName, pullList, onClose }: PullListPanelProps
   };
 
   return (
-    <aside className="flex h-full w-80 shrink-0 flex-col border-l border-[#2e2a26] bg-[#161412]">
-      <div className="flex items-center justify-between border-b border-[#2e2a26] px-3 py-2.5">
-        <div className="flex items-center gap-2">
-          <ClipboardList className="h-4 w-4 text-amber-400" />
-          <h2 className="text-sm font-semibold tracking-tight text-stone-100">Pull List</h2>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-between border-b border-[#2e2a26] px-3 py-2">
+        <div className="flex items-center gap-2 text-xs text-stone-300">
+          <span className="font-medium text-stone-200">Placements</span>
           <span className="rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-400">
             {pullList.totalPlacements}
           </span>
         </div>
 
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => void handleCopy()}
-            disabled={pullList.totalPlacements === 0}
-            title="Copy Pull List summary"
-            className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-xs text-stone-200 transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {copyState === 'copied' ? (
-              <>
-                <Check className="h-3.5 w-3.5 text-emerald-400" />
-                <span className="text-emerald-300">Copied</span>
-              </>
-            ) : copyState === 'error' ? (
-              <span className="text-red-300">Unavailable</span>
-            ) : (
-              <>
-                <Copy className="h-3.5 w-3.5" />
-                <span>Copy</span>
-              </>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close Pull List"
-            title="Close Pull List"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-800 hover:text-stone-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          disabled={pullList.totalPlacements === 0}
+          title="Copy Pull List summary"
+          className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-xs text-stone-200 transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {copyState === 'copied' ? (
+            <>
+              <Check className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="text-emerald-300">Copied</span>
+            </>
+          ) : copyState === 'error' ? (
+            <span className="text-red-300">Unavailable</span>
+          ) : (
+            <>
+              <Copy className="h-3.5 w-3.5" />
+              <span>Copy</span>
+            </>
+          )}
+        </button>
       </div>
 
       <div className="rb-scroll flex-1 overflow-y-auto px-3 py-3">
@@ -157,6 +144,6 @@ export function PullListPanel({ mapName, pullList, onClose }: PullListPanelProps
           </div>
         )}
       </div>
-    </aside>
+    </div>
   );
 }

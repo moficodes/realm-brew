@@ -1,5 +1,9 @@
 import { axialKey, clampOffsetToUnitHex, normalizeRotationDeg } from './hexGeometry';
-import { reprojectOverlayToHost, worldToClampedOverlayLocal } from './overlayGeometry';
+import {
+  overlayLocalToWorld,
+  reprojectOverlayToHost,
+  worldToClampedOverlayLocal,
+} from './overlayGeometry';
 import {
   DEFAULT_OVERLAY_PACK_COPIES,
   DEFAULT_TILESET_COPIES,
@@ -162,6 +166,288 @@ export function attachOverlayAtWorld(
         : p,
     ),
   };
+}
+
+export interface LocatedOverlayPlacement {
+  host: Placement;
+  overlay: OverlayPlacement;
+  index: number;
+}
+
+/** Locate an Overlay Placement anywhere on a Map by its unique instance id. */
+export function findOverlayById(
+  placements: readonly Placement[],
+  overlayId: string | null | undefined,
+): LocatedOverlayPlacement | null {
+  if (!overlayId) return null;
+  for (const host of placements) {
+    const overlays = host.overlays ?? [];
+    const index = overlays.findIndex((ov) => ov.id === overlayId);
+    if (index !== -1) {
+      return { host, overlay: overlays[index], index };
+    }
+  }
+  return null;
+}
+
+/** Locate an Overlay Placement attached to a specific host Placement coordinate. */
+export function findOverlayOnHost(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord | null | undefined,
+  overlayId: string | null | undefined,
+): LocatedOverlayPlacement | null {
+  if (!hostCoord || !overlayId) return null;
+  const host = findPlacementAt(placements, hostCoord);
+  if (!host) return null;
+  const overlays = host.overlays ?? [];
+  const index = overlays.findIndex((ov) => ov.id === overlayId);
+  if (index === -1) return null;
+  return { host, overlay: overlays[index], index };
+}
+
+export interface MoveOrReparentOverlayResult {
+  placements: Placement[];
+  reparented: boolean;
+  changed: boolean;
+}
+
+/**
+ * Move an Overlay Placement within its host hex or reparent it onto another occupied host,
+ * preserving visual world position (clamped inside target hex) and angle, and appending
+ * reparented Overlays to the top of the target host's stack.
+ */
+export function moveOrReparentOverlay(
+  placements: readonly Placement[],
+  fromHostCoord: AxialCoord,
+  overlayId: string,
+  targetHostCoord: AxialCoord,
+  worldX: number,
+  worldY: number,
+  radius?: number,
+): MoveOrReparentOverlayResult {
+  const fromHost = findPlacementAt(placements, fromHostCoord);
+  const targetHost = findPlacementAt(placements, targetHostCoord);
+  if (!fromHost || !targetHost) {
+    return { placements: placements as Placement[], reparented: false, changed: false };
+  }
+
+  const ov = (fromHost.overlays ?? []).find((o) => o.id === overlayId);
+  if (!ov) {
+    return { placements: placements as Placement[], reparented: false, changed: false };
+  }
+
+  const world = overlayLocalToWorld(fromHost, ov, radius);
+  const local = worldToClampedOverlayLocal(targetHost, worldX, worldY, world.worldDeg, radius);
+  const sameHost = fromHost.q === targetHost.q && fromHost.r === targetHost.r;
+
+  if (sameHost) {
+    if (
+      Math.abs(local.offsetX - ov.offsetX) < 1e-6 &&
+      Math.abs(local.offsetY - ov.offsetY) < 1e-6
+    ) {
+      return { placements: placements as Placement[], reparented: false, changed: false };
+    }
+    return {
+      reparented: false,
+      changed: true,
+      placements: placements.map((p) =>
+        p.q === fromHost.q && p.r === fromHost.r
+          ? {
+              ...p,
+              overlays: (p.overlays ?? []).map((o) =>
+                o.id === overlayId
+                  ? { ...o, offsetX: local.offsetX, offsetY: local.offsetY }
+                  : o,
+              ),
+            }
+          : p,
+      ),
+    };
+  }
+
+  const movedOverlay: OverlayPlacement = {
+    ...ov,
+    offsetX: local.offsetX,
+    offsetY: local.offsetY,
+    rotationDeg: local.rotationDeg,
+  };
+
+  return {
+    reparented: true,
+    changed: true,
+    placements: placements.map((p) => {
+      if (p.q === fromHost.q && p.r === fromHost.r) {
+        return {
+          ...p,
+          overlays: (p.overlays ?? []).filter((o) => o.id !== overlayId),
+        };
+      }
+      if (p.q === targetHost.q && p.r === targetHost.r) {
+        return {
+          ...p,
+          overlays: [...(p.overlays ?? []), movedOverlay],
+        };
+      }
+      return p;
+    }),
+  };
+}
+
+/** Set an Overlay Placement's host-local rotation angle in [0, 360), returning the same array on no-op. */
+export function setOverlayLocalRotation(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlayId: string,
+  localDeg: number,
+): Placement[] {
+  const match = findOverlayOnHost(placements, hostCoord, overlayId);
+  if (!match) return placements as Placement[];
+
+  const normalized = normalizeRotationDeg(localDeg);
+  if (Math.abs(match.overlay.rotationDeg - normalized) < 1e-6) {
+    return placements as Placement[];
+  }
+
+  return placements.map((p) =>
+    p.q === hostCoord.q && p.r === hostCoord.r
+      ? {
+          ...p,
+          overlays: (p.overlays ?? []).map((o) =>
+            o.id === overlayId ? { ...o, rotationDeg: normalized } : o,
+          ),
+        }
+      : p,
+  );
+}
+
+/** Set an Overlay Placement's angle from a world-space angle [0, 360), preserving world alignment. */
+export function setOverlayWorldRotation(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlayId: string,
+  worldDeg: number,
+): Placement[] {
+  const host = findPlacementAt(placements, hostCoord);
+  if (!host) return placements as Placement[];
+  const localDeg = normalizeRotationDeg(worldDeg - host.rotation * 60);
+  return setOverlayLocalRotation(placements, hostCoord, overlayId, localDeg);
+}
+
+/** Rotate an Overlay Placement by a relative degree delta, returning the same array on no-op. */
+export function rotateOverlayByDelta(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlayId: string,
+  deltaDeg: number,
+): Placement[] {
+  const match = findOverlayOnHost(placements, hostCoord, overlayId);
+  if (!match) return placements as Placement[];
+  return setOverlayLocalRotation(
+    placements,
+    hostCoord,
+    overlayId,
+    match.overlay.rotationDeg + deltaDeg,
+  );
+}
+
+/** Reset an Overlay Placement's host-local offset to (0, 0), returning the same array on no-op. */
+export function centerOverlayOnHost(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlayId: string,
+): Placement[] {
+  const match = findOverlayOnHost(placements, hostCoord, overlayId);
+  if (!match) return placements as Placement[];
+  if (match.overlay.offsetX === 0 && match.overlay.offsetY === 0) {
+    return placements as Placement[];
+  }
+
+  return placements.map((p) =>
+    p.q === hostCoord.q && p.r === hostCoord.r
+      ? {
+          ...p,
+          overlays: (p.overlays ?? []).map((o) =>
+            o.id === overlayId ? { ...o, offsetX: 0, offsetY: 0 } : o,
+          ),
+        }
+      : p,
+  );
+}
+
+/** Move an Overlay Placement one slot up (toward top) or down (toward bottom) in its host stack. */
+export function reorderOverlayZ(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlayId: string,
+  direction: 'up' | 'down',
+): Placement[] {
+  const match = findOverlayOnHost(placements, hostCoord, overlayId);
+  if (!match) return placements as Placement[];
+
+  const overlays = match.host.overlays ?? [];
+  const nextIndex = direction === 'up' ? match.index + 1 : match.index - 1;
+  if (nextIndex < 0 || nextIndex >= overlays.length) {
+    return placements as Placement[];
+  }
+
+  const nextOverlays = [...overlays];
+  const [item] = nextOverlays.splice(match.index, 1);
+  nextOverlays.splice(nextIndex, 0, item);
+
+  return placements.map((p) =>
+    p.q === hostCoord.q && p.r === hostCoord.r ? { ...p, overlays: nextOverlays } : p,
+  );
+}
+
+/** Remove a single Overlay Placement from its host without altering the host Placement. */
+export function removeOverlay(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlayId: string,
+): Placement[] {
+  const match = findOverlayOnHost(placements, hostCoord, overlayId);
+  if (!match) return placements as Placement[];
+
+  return placements.map((p) =>
+    p.q === hostCoord.q && p.r === hostCoord.r
+      ? {
+          ...p,
+          overlays: (p.overlays ?? []).filter((o) => o.id !== overlayId),
+        }
+      : p,
+  );
+}
+
+/** Reconcile host selection and focused Overlay ID after Undo/Redo, following reparented Overlays. */
+export function reconcileSelectionAfterHistory(
+  placements: readonly Placement[],
+  selectedCoord: AxialCoord | null,
+  focusedOverlayId: string | null,
+): { selectedCoord: AxialCoord | null; focusedOverlayId: string | null } {
+  if (focusedOverlayId) {
+    const match = findOverlayById(placements, focusedOverlayId);
+    if (match) {
+      return {
+        selectedCoord: {
+          q: match.host.q === 0 ? 0 : match.host.q,
+          r: match.host.r === 0 ? 0 : match.host.r,
+        },
+        focusedOverlayId,
+      };
+    }
+  }
+
+  if (selectedCoord && findPlacementAt(placements, selectedCoord)) {
+    return {
+      selectedCoord: {
+        q: selectedCoord.q === 0 ? 0 : selectedCoord.q,
+        r: selectedCoord.r === 0 ? 0 : selectedCoord.r,
+      },
+      focusedOverlayId: null,
+    };
+  }
+
+  return { selectedCoord: null, focusedOverlayId: null };
 }
 
 export function rotateStep(rotation: RotationStep, delta: 1 | -1): RotationStep {

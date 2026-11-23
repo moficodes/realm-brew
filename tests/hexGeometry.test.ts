@@ -18,11 +18,15 @@ import {
   zoomCameraAtScreenPoint,
 } from '../src/domain/hexGeometry';
 import {
+  MIN_OVERLAY_HIT_SIZE,
   MISSING_OVERLAY_HEIGHT,
   MISSING_OVERLAY_WIDTH,
   OVERLAY_WORLD_PER_PIXEL,
   clampWorldPointToHostHex,
+  getOverlayDialGeometry,
   getOverlayWorldSize,
+  hitTestOverlaysAtWorld,
+  isPointOnDialKnob,
   overlayLocalToWorld,
   reprojectOverlayToHost,
   worldToClampedOverlayLocal,
@@ -313,5 +317,163 @@ describe('Overlay geometry & host-local transforms (Seam 3)', () => {
     expect(
       Math.abs(rimReprojected.offsetX) + Math.abs(rimReprojected.offsetY) / Math.sqrt(3),
     ).toBeLessThanOrEqual(1 + 1e-12);
+
+    // Reparent re-projection across two different hosts with different rotations preserves world pos & angle
+    const sourceHost = { q: 0, r: 0, rotation: 1 as const };
+    const targetHost = { q: 1, r: 0, rotation: 4 as const };
+    // Point near shared right-bottom border of (0,0) and (1,0) inside (1,0)'s hex
+    const sharedTargetCenter = axialToWorld(targetHost.q, targetHost.r, HEX_RADIUS);
+    const localOnSource = worldToOverlayLocal(
+      sourceHost,
+      sharedTargetCenter.x - 10,
+      sharedTargetCenter.y + 5,
+      132.5,
+    );
+    const worldBeforeReparent = overlayLocalToWorld(sourceHost, localOnSource);
+    const localOnTarget = reprojectOverlayToHost(sourceHost, localOnSource, targetHost);
+    const worldAfterReparent = overlayLocalToWorld(targetHost, localOnTarget);
+    expect(worldAfterReparent.x).toBeCloseTo(worldBeforeReparent.x, 10);
+    expect(worldAfterReparent.y).toBeCloseTo(worldBeforeReparent.y, 10);
+    expect(worldAfterReparent.worldDeg).toBeCloseTo(132.5, 10);
+  });
+
+  it('hit-tests rotated Overlay OBBs top-to-bottom in global draw order with minimum hit-box padding and alpha awareness', () => {
+    expect(MIN_OVERLAY_HIT_SIZE).toBe(32);
+
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 1, // +60°
+        overlays: [
+          {
+            // Bottom overlay on host 0: 600x240 px -> 100x40 world units, world angle = 60 + 30 = 90° (vertical)
+            id: 'ov-bottom-bridge',
+            overlayPackId: 'mhd',
+            overlayId: 'bridge',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 30,
+          },
+          {
+            // Top overlay on host 0: tiny 96x72 px -> 16x12 world units (padded to 32x32 hit box)
+            id: 'ov-tiny-gem',
+            overlayPackId: 'mhd',
+            overlayId: 'gem',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 300, // world 0°
+          },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '03-04',
+        faceNumber: 3,
+        rotation: 0,
+        overlays: [
+          {
+            // Unresolved/missing overlay on host 1 -> 72x44 rotated OBB at 45°, NO alpha check
+            id: 'ov-missing',
+            overlayPackId: 'missing-pack',
+            overlayId: 'missing-piece',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 45,
+          },
+        ],
+      },
+    ];
+
+    // 1. Alpha-aware pass-through: tiny gem is transparent at (10, 0) [outside 16x12 raw bounds -> still hits padded 32x32!],
+    // while bridge is 100x40 rotated 90° (so 40 wide, 100 tall).
+    // Test transparent corner on bridge when gem is NOT there:
+    const lookupWithTransparentCorner = {
+      getPixelSize: (ov: { overlayId: string }) => {
+        if (ov.overlayId === 'bridge') return { width: 600, height: 240 }; // 100x40 world
+        if (ov.overlayId === 'gem') return { width: 96, height: 72 }; // 16x12 world
+        return null; // missing
+      },
+      isOpaqueAt: (ov: { overlayId: string }, u: number, v: number) => {
+        // Missing pieces must never rely on isOpaqueAt; return false here to verify it's ignored for missing
+        if (ov.overlayId === 'missing-piece') return false;
+        // Gem is opaque only in center 50% (u,v in [0.25, 0.75]), bridge has transparent corners
+        if (ov.overlayId === 'bridge') {
+          const isCorner = (u < 0.2 || u > 0.8) && (v < 0.2 || v > 0.8);
+          return !isCorner;
+        }
+        return true;
+      },
+    };
+
+    // Center (0, 0): both gem and bridge hit, gem is on top so hits[0] is gem
+    const centerHits = hitTestOverlaysAtWorld(placements, 0, 0, lookupWithTransparentCorner);
+    expect(centerHits.map((h) => h.overlay.id)).toEqual(['ov-tiny-gem', 'ov-bottom-bridge']);
+
+    // Tiny piece padding: at (12, 0), outside gem's raw 16x12 (half-w=8) but inside padded 32x32 (half-w=16)
+    const paddedGemHits = hitTestOverlaysAtWorld(placements, 12, 0, lookupWithTransparentCorner);
+    expect(paddedGemHits[0]?.overlay.id).toBe('ov-tiny-gem');
+
+    // Outside padded gem (x=0, y=40): bridge rotated 90° extends ±50 along Y and ±20 along X
+    // At (0, 40): inside bridge (local x=40 <= 50, local y=0 <= 20), opaque -> hits bridge!
+    const rotatedBridgeHits = hitTestOverlaysAtWorld(placements, 0, 40, lookupWithTransparentCorner);
+    expect(rotatedBridgeHits.map((h) => h.overlay.id)).toEqual(['ov-bottom-bridge']);
+
+    // At (40, 0): inside unrotated 100x40 AABB, but outside 90°-rotated 40x100 OBB -> misses!
+    expect(hitTestOverlaysAtWorld(placements, 40, 0, lookupWithTransparentCorner)).toEqual([]);
+
+    // Transparent corner on rotated bridge (0, 40 -> local u~0.9, v~0.1 at (16, 40)): passes through to bare Tile!
+    // Bridge local x along +Y world (rotated 90°): world (x=16, y=42) -> lx=42 (u=0.92), ly=-16 (v=0.1) -> transparent corner!
+    expect(hitTestOverlaysAtWorld(placements, 16, 42, lookupWithTransparentCorner)).toEqual([]);
+
+    // Missing Overlay on (1, 0): center is (150, 50*sqrt(3)), rotated 45°, 72x44 OBB with NO alpha check
+    const host1Center = axialToWorld(1, 0, HEX_RADIUS);
+    // Point 30u along local +X axis at 45°: (30*cos45, 30*sin45) = (21.21, 21.21) -> inside 72/2=36, 44/2=22
+    const missingHit = hitTestOverlaysAtWorld(
+      placements,
+      host1Center.x + 21,
+      host1Center.y + 21,
+      lookupWithTransparentCorner,
+    );
+    expect(missingHit).toHaveLength(1);
+    expect(missingHit[0].overlay.id).toBe('ov-missing');
+    expect(missingHit[0].isMissingAsset).toBe(true);
+    expect(missingHit[0].width).toBe(MISSING_OVERLAY_WIDTH);
+    expect(missingHit[0].height).toBe(MISSING_OVERLAY_HEIGHT);
+
+    // Point 30u perpendicular (at -45° -> outside 44/2=22 half-height) misses missing 72x44 OBB
+    const missingMiss = hitTestOverlaysAtWorld(
+      placements,
+      host1Center.x + 21,
+      host1Center.y - 21,
+      lookupWithTransparentCorner,
+    );
+    expect(missingMiss).toEqual([]);
+  });
+
+  it('computes minimal radial dial ring geometry and zoom-aware knob hit-testing', () => {
+    // At 0° world angle, knob sits directly above center (0, -ringRadius)
+    const smallDial = getOverlayDialGeometry(100, 50, 20, 20, 0);
+    expect(smallDial.ringRadius).toBe(36); // clamped min 36
+    expect(smallDial.knobX).toBeCloseTo(100, 10);
+    expect(smallDial.knobY).toBeCloseTo(50 - 36, 10);
+
+    // Huge overlay clamps max ringRadius to 82
+    const hugeDial = getOverlayDialGeometry(0, 0, 200, 200, 90);
+    expect(hugeDial.ringRadius).toBe(82);
+    // At 90° clockwise, local up points right (+ringRadius, 0)
+    expect(hugeDial.knobX).toBeCloseTo(82, 10);
+    expect(hugeDial.knobY).toBeCloseTo(0, 10);
+
+    expect(isPointOnDialKnob(82, 0, hugeDial, 1)).toBe(true);
+    expect(isPointOnDialKnob(82 + 10, 0, hugeDial, 1)).toBe(true);
+    expect(isPointOnDialKnob(82 + 15, 0, hugeDial, 1)).toBe(false);
+    // Zoomed out (zoom = 0.5) expands world hit radius to 11 / 0.5 = 22
+    expect(isPointOnDialKnob(82 + 18, 0, hugeDial, 0.5)).toBe(true);
   });
 });
