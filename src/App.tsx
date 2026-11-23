@@ -16,7 +16,7 @@ import { CollectionDialog, type CollectionPackKind } from './components/Collecti
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { PngExportDialog } from './components/PngExportDialog';
 import { PullListPanel } from './components/PullListPanel';
-import { TilePalette } from './components/TilePalette';
+import { TilePalette, type PaletteTab } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
 import {
   DEFAULT_CAMERA,
@@ -30,6 +30,7 @@ import {
   compactPlacement,
   computeCollectionUsage,
   computePullList,
+  countMapOverlays,
   createHistory,
   findPlacementAt,
   flipBrush,
@@ -46,13 +47,14 @@ import {
   type HistoryState,
 } from './domain/plannerEngine';
 import type {
+  ActiveBrush,
   AxialCoord,
-  BrushSelection,
   Collection,
   MapDocument,
   MapSummary,
   OverlayPack,
   Placement,
+  TileBrushSelection,
   Tileset,
 } from './domain/types';
 import { downloadBlob, isEditableTarget, slugifyFilename } from './utils/browserHelpers';
@@ -72,14 +74,17 @@ export function App() {
   const [activeMap, setActiveMap] = useState<MapDocument | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
+  const [paletteTab, setPaletteTab] = useState<PaletteTab>('tiles');
   const [selectedTilesetId, setSelectedTilesetId] = useState<string | 'all'>('all');
+  const [selectedOverlayPackId, setSelectedOverlayPackId] = useState<string | 'all'>('all');
+  const [overlaySearchQuery, setOverlaySearchQuery] = useState('');
   const [inStockOnly, setInStockOnly] = useState(false);
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
   const [pullListOpen, setPullListOpen] = useState(false);
-  const [activeBrush, setActiveBrush] = useState<BrushSelection | null>(null);
-  const [draggingBrush, setDraggingBrush] = useState<BrushSelection | null>(null);
+  const [activeBrush, setActiveBrush] = useState<ActiveBrush | null>(null);
+  const [draggingBrush, setDraggingBrush] = useState<ActiveBrush | null>(null);
   const [selectedCoord, setSelectedCoord] = useState<AxialCoord | null>(null);
   const [history, setHistory] = useState<HistoryState<Placement[]>>(() =>
     createHistory<Placement[]>([]),
@@ -197,10 +202,36 @@ export function App() {
     return map;
   }, [tilesets]);
 
+  const overlayPacksById = useMemo(() => {
+    const map = new Map<string, OverlayPack>();
+    for (const pack of overlayPacks) {
+      map.set(pack.id, pack);
+    }
+    return map;
+  }, [overlayPacks]);
+
   const collectionUsage = useMemo(
-    () => computeCollectionUsage(placements, tilesets, collection),
-    [placements, tilesets, collection],
+    () => computeCollectionUsage(placements, tilesets, collection, overlayPacks),
+    [placements, tilesets, collection, overlayPacks],
   );
+
+  const overlayCount = useMemo(() => countMapOverlays(placements), [placements]);
+
+  const { overBudgetTilesetIds, overBudgetOverlayPackIds } = useMemo(() => {
+    const tilesetIds = new Set<string>();
+    for (const avail of collectionUsage.byTileKey.values()) {
+      if (avail.isOverBudget) {
+        tilesetIds.add(avail.tilesetId);
+      }
+    }
+    const overlayPackIds = new Set<string>();
+    for (const avail of collectionUsage.byOverlayKey.values()) {
+      if (avail.isOverBudget) {
+        overlayPackIds.add(avail.overlayPackId);
+      }
+    }
+    return { overBudgetTilesetIds: tilesetIds, overBudgetOverlayPackIds: overlayPackIds };
+  }, [collectionUsage]);
 
   const pullList = useMemo(
     () => computePullList(placements, tilesets, collection),
@@ -344,7 +375,7 @@ export function App() {
     [flushPendingSave, loadMapIntoEditor],
   );
 
-  const handleSelectBrush = useCallback((brush: BrushSelection | null) => {
+  const handleSelectBrush = useCallback((brush: ActiveBrush | null) => {
     setActiveBrush(brush);
     if (brush) {
       setSelectedCoord(null);
@@ -352,8 +383,8 @@ export function App() {
   }, []);
 
   const handlePlaceAt = useCallback(
-    (coord: AxialCoord, brushOverride?: BrushSelection) => {
-      const brush = brushOverride ?? activeBrush;
+    (coord: AxialCoord, brushOverride?: TileBrushSelection) => {
+      const brush = brushOverride ?? (activeBrush?.kind === 'tile' ? activeBrush : null);
       if (!brush) return;
       commitPlacements((prev) =>
         placeTile(prev, {
@@ -376,9 +407,13 @@ export function App() {
   const handleRotateAction = useCallback(
     (delta: 1 | -1) => {
       if (activeBrush) {
-        setActiveBrush((prev) =>
-          prev ? { ...prev, rotation: rotateStep(prev.rotation, delta) } : null,
-        );
+        if (activeBrush.kind === 'tile') {
+          setActiveBrush((prev) =>
+            prev && prev.kind === 'tile'
+              ? { ...prev, rotation: rotateStep(prev.rotation, delta) }
+              : prev,
+          );
+        }
         return;
       }
       if (selectedCoord) {
@@ -390,7 +425,11 @@ export function App() {
 
   const handleFlipAction = useCallback(() => {
     if (activeBrush) {
-      setActiveBrush((prev) => (prev ? flipBrush(prev, tilesets) : null));
+      if (activeBrush.kind === 'tile') {
+        setActiveBrush((prev) =>
+          prev && prev.kind === 'tile' ? flipBrush(prev, tilesets) : prev,
+        );
+      }
       return;
     }
     if (selectedCoord) {
@@ -560,8 +599,11 @@ export function App() {
         activeBrush={activeBrush}
         onClearBrush={() => setActiveBrush(null)}
         tilesetsById={tilesetsById}
+        overlayPacksById={overlayPacksById}
         placementCount={placements.length}
-        overBudgetCount={collectionUsage.overBudgetCoords.size}
+        overlayCount={overlayCount}
+        overBudgetTileCount={collectionUsage.overBudgetCoords.size}
+        overBudgetOverlayCount={collectionUsage.overBudgetOverlayIds.size}
         canUndo={history.past.length > 0}
         canRedo={history.future.length > 0}
         onUndo={handleUndo}
@@ -590,16 +632,26 @@ export function App() {
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
         <TilePalette
+          activeTab={paletteTab}
+          onTabChange={setPaletteTab}
           tilesets={tilesets}
+          overlayPacks={overlayPacks}
           selectedTilesetId={selectedTilesetId}
           onSelectTileset={setSelectedTilesetId}
+          selectedOverlayPackId={selectedOverlayPackId}
+          onSelectOverlayPack={setSelectedOverlayPackId}
+          overlaySearchQuery={overlaySearchQuery}
+          onOverlaySearchChange={setOverlaySearchQuery}
           inStockOnly={inStockOnly}
           onToggleInStockOnly={() => setInStockOnly((v) => !v)}
           availabilityByTileKey={collectionUsage.byTileKey}
+          availabilityByOverlayKey={collectionUsage.byOverlayKey}
+          overBudgetTilesetIds={overBudgetTilesetIds}
+          overBudgetOverlayPackIds={overBudgetOverlayPackIds}
           activeBrush={activeBrush}
           onSelectBrush={handleSelectBrush}
-          onDragFaceStart={setDraggingBrush}
-          onDragFaceEnd={() => setDraggingBrush(null)}
+          onDragBrushStart={setDraggingBrush}
+          onDragBrushEnd={() => setDraggingBrush(null)}
           collapsed={paletteCollapsed}
           onToggleCollapse={() => setPaletteCollapsed((c) => !c)}
           bundleError={bundleError}

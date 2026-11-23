@@ -1,6 +1,10 @@
 import { Minus, Package, Plus, X } from 'lucide-react';
 import { useId, useMemo, useRef } from 'react';
-import { DEFAULT_OVERLAY_PACK_COPIES, DEFAULT_TILESET_COPIES } from '../domain/plannerEngine';
+import {
+  DEFAULT_OVERLAY_PACK_COPIES,
+  DEFAULT_TILESET_COPIES,
+  sortOverlayPacksPairedFirst,
+} from '../domain/plannerEngine';
 import type { Collection, OverlayPack, Tileset } from '../domain/types';
 import { useModalDialog } from './useModalDialog';
 
@@ -122,23 +126,13 @@ export function CollectionDialog({
 
   const { tilesetNamesById, orderedOverlayPacks } = useMemo(() => {
     const names = new Map<string, string>();
-    const order = new Map<string, number>();
-    tilesets.forEach((ts, idx) => {
+    tilesets.forEach((ts) => {
       names.set(ts.id, ts.name);
-      order.set(ts.id, idx);
     });
-    const ordered = [...overlayPacks].sort((a, b) => {
-      const aPaired = a.pairedTilesetId !== null;
-      const bPaired = b.pairedTilesetId !== null;
-      if (aPaired !== bPaired) return aPaired ? -1 : 1;
-      if (aPaired && bPaired) {
-        const aOrder = order.get(a.pairedTilesetId!) ?? Number.MAX_SAFE_INTEGER;
-        const bOrder = order.get(b.pairedTilesetId!) ?? Number.MAX_SAFE_INTEGER;
-        if (aOrder !== bOrder) return aOrder - bOrder;
-      }
-      return a.name.localeCompare(b.name);
-    });
-    return { tilesetNamesById: names, orderedOverlayPacks: ordered };
+    return {
+      tilesetNamesById: names,
+      orderedOverlayPacks: sortOverlayPacksPairedFirst(overlayPacks, tilesets),
+    };
   }, [tilesets, overlayPacks]);
 
   return (

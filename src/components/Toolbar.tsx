@@ -14,8 +14,11 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { formatAssemblyLabel } from '../domain/plannerEngine';
-import type { BrushSelection, MapSummary, Tileset } from '../domain/types';
+import {
+  formatActiveBrushLabel,
+  formatMapSummaryCounts,
+} from '../domain/plannerEngine';
+import type { ActiveBrush, MapSummary, OverlayPack, Tileset } from '../domain/types';
 import { MapSwitcher } from './MapSwitcher';
 
 interface ToolbarProps {
@@ -40,11 +43,14 @@ interface ToolbarProps {
   onZoomOut: () => void;
   onResetZoom: () => void;
   onFitToContent: () => void;
-  activeBrush: BrushSelection | null;
+  activeBrush: ActiveBrush | null;
   onClearBrush: () => void;
   tilesetsById: ReadonlyMap<string, Tileset>;
+  overlayPacksById: ReadonlyMap<string, OverlayPack>;
   placementCount: number;
-  overBudgetCount: number;
+  overlayCount: number;
+  overBudgetTileCount: number;
+  overBudgetOverlayCount: number;
   canUndo: boolean;
   canRedo: boolean;
   onUndo: () => void;
@@ -79,8 +85,11 @@ export function Toolbar({
   activeBrush,
   onClearBrush,
   tilesetsById,
+  overlayPacksById,
   placementCount,
-  overBudgetCount,
+  overlayCount,
+  overBudgetTileCount,
+  overBudgetOverlayCount,
   canUndo,
   canRedo,
   onUndo,
@@ -89,7 +98,15 @@ export function Toolbar({
   onOpenCollection,
   onOpenPngExport,
 }: ToolbarProps) {
-  const activeLabel = activeBrush ? formatAssemblyLabel(activeBrush, tilesetsById) : null;
+  const activeLabel = activeBrush
+    ? formatActiveBrushLabel(activeBrush, tilesetsById, overlayPacksById)
+    : null;
+  const totalOverBudget = overBudgetTileCount + overBudgetOverlayCount;
+  const overBudgetTooltip = `${overBudgetTileCount} Tile ${
+    overBudgetTileCount === 1 ? 'Placement' : 'Placements'
+  }, ${overBudgetOverlayCount} Overlay ${
+    overBudgetOverlayCount === 1 ? 'Placement' : 'Placements'
+  } over budget`;
 
   return (
     <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#2e2a26] bg-[#161412] px-3 py-1.5">
@@ -115,24 +132,30 @@ export function Toolbar({
         />
 
         <span className="rounded bg-[#1c1917] px-2 py-0.5 text-xs text-stone-400">
-          {placementCount}
+          {formatMapSummaryCounts(placementCount, overlayCount)}
         </span>
 
-        {overBudgetCount > 0 && (
-          <span
-            title="Some Placements exceed your physical Collection copy count"
-            className="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-950/50 px-2 py-0.5 text-xs font-medium text-red-300"
+        {totalOverBudget > 0 && (
+          <button
+            type="button"
+            onClick={onOpenCollection}
+            title={overBudgetTooltip}
+            aria-label={`${totalOverBudget} over budget — ${overBudgetTooltip}`}
+            className="inline-flex cursor-pointer items-center gap-1 rounded border border-red-500/40 bg-red-950/50 px-2 py-0.5 text-xs font-medium text-red-300 transition hover:bg-red-900/60"
           >
             <AlertTriangle className="h-3 w-3 text-red-400" />
-            {overBudgetCount} over
-          </span>
+            {totalOverBudget} over
+          </button>
         )}
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
         {activeLabel && (
-          <div className="flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
-            <span className="font-mono font-semibold">{activeLabel}</span>
+          <div
+            title={activeLabel}
+            className="flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200"
+          >
+            <span className="max-w-44 truncate font-mono font-semibold">{activeLabel}</span>
             <button
               type="button"
               onClick={onClearBrush}

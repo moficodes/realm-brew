@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildOverlayPaletteSections,
   canFlipTarget,
   clearMap,
   commitHistory,
@@ -7,27 +8,41 @@ import {
   computeCollectionUsage,
   computePullList,
   createHistory,
+  extractOverlayPrefix,
   flipBrush,
   flipPlacement,
+  formatActiveBrushLabel,
   formatAssemblyLabel,
   formatMapSummaryCounts,
   formatPullListText,
+  groupOverlaysByPrefix,
   mergeCollectionDefaults,
   moveOrSwapPlacement,
   normalizeCollection,
+  overlayCollectionKey,
   placeTile,
   redoHistory,
   removePlacement,
+  resolveOverlayAsset,
   resolvePlacementAsset,
   rotatePlacement,
   rotateStep,
+  sortOverlayPacksPairedFirst,
   toMapSummary,
   undoHistory,
   validateAndParseMapJson,
   validateCollection,
   validatePlacements,
 } from '../src/domain/plannerEngine';
-import type { BrushSelection, Collection, Placement, Tileset } from '../src/domain/types';
+import type {
+  ActiveBrush,
+  BrushSelection,
+  Collection,
+  Overlay,
+  OverlayPack,
+  Placement,
+  Tileset,
+} from '../src/domain/types';
 
 function makeTestTileset(id: string, shortCode: string): Tileset {
   return {
@@ -695,5 +710,322 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
         updatedAt: v2Parsed.map.updatedAt,
       });
     }
+  });
+
+  it('tracks per-Map Overlay Collection accounting, soft-warns over-budget & 0-copy packs, and excludes missing Overlay assets', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const awPack: OverlayPack = {
+      id: 'alchemists-workshop',
+      name: "Alchemists' Workshop",
+      shortCode: 'AW',
+      pairedTilesetId: null,
+      overlays: [
+        {
+          overlayId: 'door-1',
+          overlayPackId: 'alchemists-workshop',
+          label: 'Door 1',
+          filename: 'Door 1.png',
+          url: '/api/overlay-assets/alchemists-workshop/Door%201.png',
+        },
+        {
+          overlayId: 'door-2',
+          overlayPackId: 'alchemists-workshop',
+          label: 'Door 2',
+          filename: 'Door 2.png',
+          url: '/api/overlay-assets/alchemists-workshop/Door%202.png',
+        },
+      ],
+    };
+    const rdlPack: OverlayPack = {
+      id: 'red-dragons-lair',
+      name: "Red Dragon's Lair",
+      shortCode: 'RDL',
+      pairedTilesetId: null,
+      overlays: [
+        {
+          overlayId: 'dragon-nest',
+          overlayPackId: 'red-dragons-lair',
+          label: 'Dragon Nest',
+          filename: 'Dragon Nest.png',
+          url: '/api/overlay-assets/red-dragons-lair/Dragon%20Nest.png',
+        },
+      ],
+    };
+
+    const collection: Collection = {
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 2 },
+      overlayPacks: { 'alchemists-workshop': 2, 'red-dragons-lair': 0 },
+    };
+
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          { id: 'ov-1', overlayPackId: 'alchemists-workshop', overlayId: 'door-1', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-2', overlayPackId: 'alchemists-workshop', overlayId: 'door-1', offsetX: 0.2, offsetY: 0, rotationDeg: 90 },
+          { id: 'ov-3', overlayPackId: 'alchemists-workshop', overlayId: 'door-2', offsetX: -0.2, offsetY: 0, rotationDeg: 45 },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: 'missing-tileset',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          { id: 'ov-4', overlayPackId: 'alchemists-workshop', overlayId: 'door-1', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-5', overlayPackId: 'red-dragons-lair', overlayId: 'dragon-nest', offsetX: 0, offsetY: 0, rotationDeg: 15 },
+          { id: 'ov-missing-pack', overlayPackId: 'future-pack', overlayId: 'table', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-missing-piece', overlayPackId: 'red-dragons-lair', overlayId: 'nonexistent', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+        ],
+      },
+    ];
+
+    const packsById = new Map([
+      [awPack.id, awPack],
+      [rdlPack.id, rdlPack],
+    ]);
+    expect(resolveOverlayAsset(placements[0].overlays![0], packsById).status).toBe('ok');
+    expect(resolveOverlayAsset(placements[1].overlays![2], packsById).status).toBe('missing-pack');
+    expect(resolveOverlayAsset(placements[1].overlays![3], packsById).status).toBe('missing-overlay');
+
+    const usage = computeCollectionUsage(placements, [mhd], collection, [awPack, rdlPack]);
+
+    expect(usage.byOverlayKey.get(overlayCollectionKey('alchemists-workshop', 'door-1'))).toEqual({
+      overlayPackId: 'alchemists-workshop',
+      overlayId: 'door-1',
+      owned: 2,
+      used: 3,
+      remaining: -1,
+      isOverBudget: true,
+    });
+    expect(usage.byOverlayKey.get(overlayCollectionKey('alchemists-workshop', 'door-2'))).toEqual({
+      overlayPackId: 'alchemists-workshop',
+      overlayId: 'door-2',
+      owned: 2,
+      used: 1,
+      remaining: 1,
+      isOverBudget: false,
+    });
+    // 0-copy digital-only pack soft-warns on first Overlay Placement
+    expect(usage.byOverlayKey.get(overlayCollectionKey('red-dragons-lair', 'dragon-nest'))).toEqual({
+      overlayPackId: 'red-dragons-lair',
+      overlayId: 'dragon-nest',
+      owned: 0,
+      used: 1,
+      remaining: -1,
+      isOverBudget: true,
+    });
+
+    expect(usage.overBudgetOverlayIds).toEqual(new Set(['ov-1', 'ov-2', 'ov-4', 'ov-5']));
+    expect(usage.overBudgetOverlayIds.has('ov-3')).toBe(false);
+    expect(usage.overBudgetOverlayIds.has('ov-missing-pack')).toBe(false);
+    expect(usage.overBudgetOverlayIds.has('ov-missing-piece')).toBe(false);
+  });
+
+  it('groups Overlays with natural sorting, (...) & number stripping, singular/plural merge, Other bucket, and single-group header omission', () => {
+    const mkOverlay = (label: string, packId = 'gh'): Overlay => ({
+      overlayId: label.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+      overlayPackId: packId,
+      label,
+      filename: `${label}.png`,
+      url: `/api/overlay-assets/${packId}/${encodeURIComponent(label)}.png`,
+    });
+
+    expect(extractOverlayPrefix('Bridge (Broken) 1')).toBe('Bridge');
+    expect(extractOverlayPrefix('Traps (Poison Gas 2)')).toBe('Traps');
+    expect(extractOverlayPrefix('Niche (Head Statue)')).toBe('Niche');
+    expect(extractOverlayPrefix('Door 10')).toBe('Door');
+
+    // Multi-group pack: natural numeric sort, case-insensitive singular/plural merge, singleton Other at bottom
+    const mixed: Overlay[] = [
+      mkOverlay('Wardrums'),
+      mkOverlay('Door 10'),
+      mkOverlay('Door 2'),
+      mkOverlay('door 1'),
+      mkOverlay('Bridge (Broken) 10'),
+      mkOverlay('Bridge (Broken) 2'),
+      mkOverlay('Bridge 1'),
+      mkOverlay('Trap (Spring Pull Snare)'),
+      mkOverlay('Traps (Pit Fall)'),
+      mkOverlay('traps (Snare)'),
+      mkOverlay('Cage'),
+    ];
+    const grouped = groupOverlaysByPrefix(mixed);
+    expect(grouped.map((g) => ({ heading: g.heading, labels: g.overlays.map((o) => o.label) }))).toEqual([
+      {
+        heading: 'Bridge',
+        labels: ['Bridge (Broken) 2', 'Bridge (Broken) 10', 'Bridge 1'],
+      },
+      {
+        heading: 'Door',
+        labels: ['door 1', 'Door 2', 'Door 10'],
+      },
+      {
+        heading: 'Traps',
+        labels: ['Trap (Spring Pull Snare)', 'Traps (Pit Fall)', 'traps (Snare)'],
+      },
+      {
+        heading: 'Other',
+        labels: ['Cage', 'Wardrums'],
+      },
+    ]);
+
+    // Single multi-item prefix resolves to one group -> heading omitted (null), natural sort preserved
+    const singlePrefix = groupOverlaysByPrefix([
+      mkOverlay('Door 10', 'aw'),
+      mkOverlay('Door 2', 'aw'),
+      mkOverlay('Door 1', 'aw'),
+    ]);
+    expect(singlePrefix).toHaveLength(1);
+    expect(singlePrefix[0].heading).toBeNull();
+    expect(singlePrefix[0].overlays.map((o) => o.label)).toEqual(['Door 1', 'Door 2', 'Door 10']);
+
+    // All singletons resolve to one Other group -> heading omitted (null)
+    const allSingletons = groupOverlaysByPrefix([mkOverlay('Wardrums'), mkOverlay('Cage')]);
+    expect(allSingletons).toHaveLength(1);
+    expect(allSingletons[0].heading).toBeNull();
+    expect(allSingletons[0].overlays.map((o) => o.label)).toEqual(['Cage', 'Wardrums']);
+
+    expect(groupOverlaysByPrefix([])).toEqual([]);
+
+    // Paired-first then standalone alphabetical pack ordering
+    const tilesets = [
+      makeTestTileset('man-hewn-dungeons', 'MHD'),
+      makeTestTileset('subterranean-rivers', 'SR'),
+      makeTestTileset('underdark-caverns', 'UC'),
+    ];
+    const shuffledPacks: OverlayPack[] = [
+      { id: 'red-dragons-lair', name: "Red Dragon's Lair", shortCode: 'RDL', pairedTilesetId: null, overlays: [] },
+      { id: 'underdark-caverns', name: 'Underdark Caverns', shortCode: 'UC', pairedTilesetId: 'underdark-caverns', overlays: [] },
+      { id: 'alchemists-workshop', name: "Alchemists' Workshop", shortCode: 'AW', pairedTilesetId: null, overlays: [] },
+      { id: 'man-hewn-dungeons', name: 'Man Hewn Dungeons', shortCode: 'MHD', pairedTilesetId: 'man-hewn-dungeons', overlays: [] },
+      { id: 'goblins-hideout', name: "Goblins' Hideout", shortCode: 'GH', pairedTilesetId: null, overlays: [] },
+      { id: 'subterranean-rivers', name: 'Subterranean Rivers', shortCode: 'SR', pairedTilesetId: 'subterranean-rivers', overlays: [] },
+    ];
+    expect(sortOverlayPacksPairedFirst(shuffledPacks, tilesets).map((p) => p.shortCode)).toEqual([
+      'MHD',
+      'SR',
+      'UC',
+      'AW',
+      'GH',
+      'RDL',
+    ]);
+
+    const tileBrush: ActiveBrush = {
+      kind: 'tile',
+      tilesetId: 'man-hewn-dungeons',
+      tileId: '01-02',
+      faceNumber: 1,
+      rotation: 0,
+    };
+    const overlayBrush: ActiveBrush = {
+      kind: 'overlay',
+      overlayPackId: 'alchemists-workshop',
+      overlayId: 'laboratory-lab-bench',
+      label: 'Laboratory (Lab Bench)',
+      shortCode: 'AW',
+      url: '/api/overlay-assets/alchemists-workshop/Laboratory%20(Lab%20Bench).png',
+      rotationDeg: 0,
+    };
+    const tilesetsById = new Map(tilesets.map((t) => [t.id, t]));
+    expect(formatActiveBrushLabel(tileBrush, tilesetsById)).toBe('MHD #01');
+    expect(formatActiveBrushLabel(overlayBrush, tilesetsById)).toBe('AW Laboratory (Lab Bench)');
+    expect(flipBrush(tileBrush, tilesets).kind).toBe('tile');
+
+    // In-stock only + scoped search filtering across Overlay Packs and prefix groups
+    const awOverlays: OverlayPack = {
+      id: 'alchemists-workshop',
+      name: "Alchemists' Workshop",
+      shortCode: 'AW',
+      pairedTilesetId: null,
+      overlays: [
+        mkOverlay('Door 1', 'alchemists-workshop'),
+        mkOverlay('Door 2', 'alchemists-workshop'),
+        mkOverlay('Bridge 1', 'alchemists-workshop'),
+        mkOverlay('Bridge 2', 'alchemists-workshop'),
+      ],
+    };
+    const rdlOverlays: OverlayPack = {
+      id: 'red-dragons-lair',
+      name: "Red Dragon's Lair",
+      shortCode: 'RDL',
+      pairedTilesetId: null,
+      overlays: [mkOverlay('Dragon Nest', 'red-dragons-lair')],
+    };
+    const col: Collection = {
+      version: 2,
+      tilesets: {},
+      overlayPacks: { 'alchemists-workshop': 1, 'red-dragons-lair': 0 },
+    };
+    const usage = computeCollectionUsage(
+      [
+        {
+          q: 0,
+          r: 0,
+          tilesetId: 'mhd',
+          tileId: '01-02',
+          faceNumber: 1,
+          rotation: 0,
+          overlays: [
+            { id: 'u1', overlayPackId: 'alchemists-workshop', overlayId: 'door-1', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+            { id: 'u2', overlayPackId: 'alchemists-workshop', overlayId: 'door-2', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          ],
+        },
+      ],
+      [],
+      col,
+      [awOverlays, rdlOverlays],
+    );
+    const groupedMap = new Map([
+      [awOverlays.id, groupOverlaysByPrefix(awOverlays.overlays)],
+      [rdlOverlays.id, groupOverlaysByPrefix(rdlOverlays.overlays)],
+    ]);
+
+    // In-stock only omits 0-copy RDL pack and exhausted Door group in AW, leaving only Bridge -> 1 group (heading: null)
+    const inStockResult = buildOverlayPaletteSections({
+      orderedPacks: [awOverlays, rdlOverlays],
+      groupedByPackId: groupedMap,
+      selectedPackId: 'all',
+      searchQuery: '',
+      inStockOnly: true,
+      availabilityByOverlayKey: usage.byOverlayKey,
+    });
+    expect(inStockResult.sections).toHaveLength(1);
+    expect(inStockResult.sections[0].pack.id).toBe('alchemists-workshop');
+    expect(inStockResult.sections[0].groups).toHaveLength(1);
+    expect(inStockResult.sections[0].groups[0].heading).toBeNull();
+    expect(inStockResult.sections[0].groups[0].overlays.map((o) => o.label)).toEqual(['Bridge 1', 'Bridge 2']);
+
+    // Searching "Dragon" while scoped to AW yields 0 in AW, 1 match across all packs when not inStockOnly, 0 when inStockOnly
+    const scopedAllStock = buildOverlayPaletteSections({
+      orderedPacks: [awOverlays, rdlOverlays],
+      groupedByPackId: groupedMap,
+      selectedPackId: 'alchemists-workshop',
+      searchQuery: 'dragon',
+      inStockOnly: false,
+      availabilityByOverlayKey: usage.byOverlayKey,
+    });
+    expect(scopedAllStock.sections).toHaveLength(0);
+    expect(scopedAllStock.totalMatchesAllPacks).toBe(1);
+
+    const scopedInStockOnly = buildOverlayPaletteSections({
+      orderedPacks: [awOverlays, rdlOverlays],
+      groupedByPackId: groupedMap,
+      selectedPackId: 'alchemists-workshop',
+      searchQuery: 'dragon',
+      inStockOnly: true,
+      availabilityByOverlayKey: usage.byOverlayKey,
+    });
+    expect(scopedInStockOnly.sections).toHaveLength(0);
+    expect(scopedInStockOnly.totalMatchesAllPacks).toBe(0);
   });
 });

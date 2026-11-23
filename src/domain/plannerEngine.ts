@@ -3,11 +3,14 @@ import {
   DEFAULT_OVERLAY_PACK_COPIES,
   DEFAULT_TILESET_COPIES,
   padFaceNumber,
+  type ActiveBrush,
   type AxialCoord,
   type BrushSelection,
   type Collection,
   type MapDocument,
   type MapSummary,
+  type Overlay,
+  type OverlayPack,
   type OverlayPlacement,
   type Placement,
   type PlacementKey,
@@ -28,9 +31,20 @@ export interface TileAvailability {
   isOverBudget: boolean;
 }
 
+export interface OverlayAvailability {
+  overlayPackId: string;
+  overlayId: string;
+  owned: number;
+  used: number;
+  remaining: number;
+  isOverBudget: boolean;
+}
+
 export interface CollectionUsage {
   byTileKey: Map<string, TileAvailability>;
   overBudgetCoords: Set<PlacementKey>;
+  byOverlayKey: Map<string, OverlayAvailability>;
+  overBudgetOverlayIds: Set<string>;
 }
 
 export interface HistoryState<T> {
@@ -41,6 +55,11 @@ export interface HistoryState<T> {
 
 export function tileCollectionKey(tilesetId: string, tileId: string): string {
   return `${tilesetId}:${tileId}`;
+}
+
+/** Build the Collection lookup key for an Overlay within an Overlay Pack. */
+export function overlayCollectionKey(overlayPackId: string, overlayId: string): string {
+  return `${overlayPackId}:${overlayId}`;
 }
 
 export function findPlacementAt(
@@ -102,7 +121,7 @@ export function canFlipTarget(
   return Boolean(tile && !tile.isSymmetric);
 }
 
-export function flipBrush(brush: BrushSelection, tilesets: readonly Tileset[]): BrushSelection {
+export function flipBrush<T extends BrushSelection>(brush: T, tilesets: readonly Tileset[]): T {
   const nextFace = resolveFlippedFaceNumber(
     brush.tilesetId,
     brush.tileId,
@@ -194,19 +213,32 @@ export function computeCollectionUsage(
   placements: readonly Placement[],
   tilesets: readonly Tileset[],
   collection: Collection,
+  overlayPacks: readonly OverlayPack[] = [],
 ): CollectionUsage {
   const tilesetsById = new Map<string, Tileset>(tilesets.map((t) => [t.id, t]));
+  const overlayPacksById = new Map<string, OverlayPack>(overlayPacks.map((p) => [p.id, p]));
   const usedCounts = new Map<string, number>();
   const resolvedPlacements = new Map<PlacementKey, string>();
+  const usedOverlayCounts = new Map<string, number>();
+  const resolvedOverlays = new Map<string, string>();
 
   for (const p of placements) {
     const resolved = resolvePlacementAsset(p, tilesetsById);
-    if (resolved.status !== 'ok') {
-      continue;
+    if (resolved.status === 'ok') {
+      const key = tileCollectionKey(p.tilesetId, resolved.tile.tileId);
+      usedCounts.set(key, (usedCounts.get(key) ?? 0) + 1);
+      resolvedPlacements.set(axialKey(p.q, p.r), key);
     }
-    const key = tileCollectionKey(p.tilesetId, resolved.tile.tileId);
-    usedCounts.set(key, (usedCounts.get(key) ?? 0) + 1);
-    resolvedPlacements.set(axialKey(p.q, p.r), key);
+
+    for (const ov of p.overlays ?? []) {
+      const resolvedOv = resolveOverlayAsset(ov, overlayPacksById);
+      if (resolvedOv.status !== 'ok') {
+        continue;
+      }
+      const ovKey = overlayCollectionKey(ov.overlayPackId, resolvedOv.overlay.overlayId);
+      usedOverlayCounts.set(ovKey, (usedOverlayCounts.get(ovKey) ?? 0) + 1);
+      resolvedOverlays.set(ov.id, ovKey);
+    }
   }
 
   const byTileKey = new Map<string, TileAvailability>();
@@ -236,7 +268,34 @@ export function computeCollectionUsage(
     }
   }
 
-  return { byTileKey, overBudgetCoords };
+  const byOverlayKey = new Map<string, OverlayAvailability>();
+
+  for (const pack of overlayPacks) {
+    const owned = collection.overlayPacks[pack.id] ?? DEFAULT_OVERLAY_PACK_COPIES;
+    for (const overlay of pack.overlays) {
+      const key = overlayCollectionKey(pack.id, overlay.overlayId);
+      const used = usedOverlayCounts.get(key) ?? 0;
+      const remaining = owned - used;
+      byOverlayKey.set(key, {
+        overlayPackId: pack.id,
+        overlayId: overlay.overlayId,
+        owned,
+        used,
+        remaining,
+        isOverBudget: remaining < 0,
+      });
+    }
+  }
+
+  const overBudgetOverlayIds = new Set<string>();
+  for (const [instanceId, key] of resolvedOverlays.entries()) {
+    const entry = byOverlayKey.get(key);
+    if (entry?.isOverBudget) {
+      overBudgetOverlayIds.add(instanceId);
+    }
+  }
+
+  return { byTileKey, overBudgetCoords, byOverlayKey, overBudgetOverlayIds };
 }
 
 function validateCountMap(input: unknown): Record<string, number> | null {
@@ -566,6 +625,58 @@ export function resolvePlacementAsset(
   };
 }
 
+export type ResolvedOverlayAsset =
+  | {
+      status: 'ok';
+      url: string;
+      shortCode: string;
+      pack: OverlayPack;
+      overlay: Overlay;
+    }
+  | {
+      status: 'missing-pack' | 'missing-overlay';
+      url: null;
+      shortCode: string | null;
+      pack: OverlayPack | null;
+      overlay: null;
+    };
+
+/** Resolve an Overlay Placement against discovered Overlay Packs without dropping missing references. */
+export function resolveOverlayAsset(
+  overlayPlacement: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'>,
+  overlayPacksById: ReadonlyMap<string, OverlayPack>,
+): ResolvedOverlayAsset {
+  const pack = overlayPacksById.get(overlayPlacement.overlayPackId);
+  if (!pack) {
+    return {
+      status: 'missing-pack',
+      url: null,
+      shortCode: null,
+      pack: null,
+      overlay: null,
+    };
+  }
+
+  const overlay = pack.overlays.find((o) => o.overlayId === overlayPlacement.overlayId);
+  if (!overlay) {
+    return {
+      status: 'missing-overlay',
+      url: null,
+      shortCode: pack.shortCode,
+      pack,
+      overlay: null,
+    };
+  }
+
+  return {
+    status: 'ok',
+    url: overlay.url,
+    shortCode: pack.shortCode,
+    pack,
+    overlay,
+  };
+}
+
 export interface PullListFaceUsage {
   faceNumber: number;
   label: string;
@@ -615,6 +726,21 @@ export function formatAssemblyLabel(
     return `?${placement.tilesetId} #${padded}`;
   }
   return `${tileset.shortCode} #${padded}`;
+}
+
+/** Format the active Tile or Overlay brush pill label for the Toolbar. */
+export function formatActiveBrushLabel(
+  brush: ActiveBrush,
+  tilesetsById: ReadonlyMap<string, Tileset>,
+  overlayPacksById?: ReadonlyMap<string, OverlayPack>,
+): string {
+  if (brush.kind === 'tile') {
+    return formatAssemblyLabel(brush, tilesetsById);
+  }
+  const pack = overlayPacksById?.get(brush.overlayPackId);
+  const shortCode = pack?.shortCode ?? brush.shortCode;
+  const label = pack?.overlays.find((o) => o.overlayId === brush.overlayId)?.label ?? brush.label;
+  return `${shortCode} ${label}`;
 }
 
 export function computePullList(
@@ -734,4 +860,241 @@ export function formatPullListText(mapName: string, pullList: PullListSummary): 
   }
 
   return lines.join('\n');
+}
+
+export interface OverlayPrefixGroup {
+  heading: string | null;
+  name: string;
+  isOther: boolean;
+  overlays: Overlay[];
+}
+
+/** Compare labels in natural numeric order (e.g., Door 2 before Door 10). */
+export function naturalCompareLabels(a: string, b: string): number {
+  return (
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }) ||
+    a.localeCompare(b)
+  );
+}
+
+/** Derive a grouping prefix from an Overlay label by stripping (...) and trailing numbers. */
+export function extractOverlayPrefix(label: string): string {
+  const withoutParens = label.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+  const withoutNumbers = withoutParens.replace(/(?:\s*\d+)+$/, '').trim();
+  return withoutNumbers || withoutParens || label.trim() || 'Other';
+}
+
+function singularCandidates(pluralLower: string): string[] {
+  const candidates: string[] = [];
+  if (pluralLower.endsWith('ies') && pluralLower.length > 3) {
+    candidates.push(`${pluralLower.slice(0, -3)}y`);
+  }
+  if (pluralLower.endsWith('ves') && pluralLower.length > 3) {
+    candidates.push(`${pluralLower.slice(0, -3)}f`);
+    candidates.push(`${pluralLower.slice(0, -3)}fe`);
+  }
+  if (pluralLower.endsWith('es') && pluralLower.length > 2) {
+    const stem = pluralLower.slice(0, -2);
+    if (/(?:s|x|z|ch|sh)$/.test(stem)) {
+      candidates.push(stem);
+    }
+  }
+  if (pluralLower.endsWith('s') && !pluralLower.endsWith('ss') && pluralLower.length > 1) {
+    candidates.push(pluralLower.slice(0, -1));
+  }
+  return candidates;
+}
+
+function pickPreferredPrefixLabel(labels: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const label of labels) {
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const candidates = Array.from(counts.keys());
+  candidates.sort((a, b) => {
+    const aUpper = /^[A-Z]/.test(a) ? 0 : 1;
+    const bUpper = /^[A-Z]/.test(b) ? 0 : 1;
+    if (aUpper !== bUpper) return aUpper - bUpper;
+    const countDiff = (counts.get(b) ?? 0) - (counts.get(a) ?? 0);
+    if (countDiff !== 0) return countDiff;
+    return a.localeCompare(b);
+  });
+  return candidates[0] ?? 'Other';
+}
+
+/**
+ * Group an Overlay Pack's pieces under natural-sorted filename-prefix subheadings,
+ * merging case-insensitive singular/plural pairs, collecting singletons under a bottom
+ * Other group, and omitting headings when a pack resolves to a single group.
+ */
+export function groupOverlaysByPrefix(overlays: readonly Overlay[]): OverlayPrefixGroup[] {
+  if (overlays.length === 0) return [];
+
+  const buckets = new Map<string, { labels: string[]; overlays: Overlay[] }>();
+  for (const overlay of overlays) {
+    const prefix = extractOverlayPrefix(overlay.label);
+    const key = prefix.toLowerCase();
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { labels: [], overlays: [] };
+      buckets.set(key, bucket);
+    }
+    bucket.labels.push(prefix);
+    bucket.overlays.push(overlay);
+  }
+
+  for (const pluralKey of Array.from(buckets.keys())) {
+    const pluralBucket = buckets.get(pluralKey);
+    if (!pluralBucket) continue;
+    for (const singKey of singularCandidates(pluralKey)) {
+      if (singKey === pluralKey) continue;
+      const singBucket = buckets.get(singKey);
+      if (!singBucket) continue;
+      pluralBucket.overlays.push(...singBucket.overlays);
+      buckets.delete(singKey);
+    }
+  }
+
+  const multiGroups: OverlayPrefixGroup[] = [];
+  const otherOverlays: Overlay[] = [];
+
+  for (const bucket of buckets.values()) {
+    if (bucket.overlays.length === 1) {
+      otherOverlays.push(bucket.overlays[0]);
+      continue;
+    }
+    const name = pickPreferredPrefixLabel(bucket.labels);
+    const sorted = [...bucket.overlays].sort((a, b) => naturalCompareLabels(a.label, b.label));
+    multiGroups.push({
+      heading: name,
+      name,
+      isOther: false,
+      overlays: sorted,
+    });
+  }
+
+  multiGroups.sort((a, b) => naturalCompareLabels(a.name, b.name));
+
+  if (otherOverlays.length > 0) {
+    otherOverlays.sort((a, b) => naturalCompareLabels(a.label, b.label));
+    multiGroups.push({
+      heading: 'Other',
+      name: 'Other',
+      isOther: true,
+      overlays: otherOverlays,
+    });
+  }
+
+  if (multiGroups.length === 1) {
+    multiGroups[0].heading = null;
+  }
+
+  return multiGroups;
+}
+
+/** Order Overlay Packs with Tileset-paired packs first (in Tileset order), then standalone alphabetically. */
+export function sortOverlayPacksPairedFirst(
+  overlayPacks: readonly OverlayPack[],
+  tilesets: readonly Tileset[],
+): OverlayPack[] {
+  const tilesetOrder = new Map<string, number>();
+  tilesets.forEach((ts, idx) => {
+    tilesetOrder.set(ts.id, idx);
+  });
+
+  return [...overlayPacks].sort((a, b) => {
+    const aPaired = a.pairedTilesetId !== null;
+    const bPaired = b.pairedTilesetId !== null;
+    if (aPaired !== bPaired) return aPaired ? -1 : 1;
+    if (aPaired && bPaired) {
+      const aOrder = tilesetOrder.get(a.pairedTilesetId!) ?? Number.MAX_SAFE_INTEGER;
+      const bOrder = tilesetOrder.get(b.pairedTilesetId!) ?? Number.MAX_SAFE_INTEGER;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+    }
+    return a.name.localeCompare(b.name);
+  });
+}
+
+export interface OverlayPaletteSection {
+  pack: OverlayPack;
+  groups: OverlayPrefixGroup[];
+  totalCount: number;
+}
+
+export interface OverlayPaletteFilterResult {
+  sections: OverlayPaletteSection[];
+  totalMatchesAllPacks: number;
+}
+
+/** Filter grouped Overlay Packs by selected pack, live search query, and In-stock only toggle. */
+export function buildOverlayPaletteSections(params: {
+  orderedPacks: readonly OverlayPack[];
+  groupedByPackId: ReadonlyMap<string, readonly OverlayPrefixGroup[]>;
+  selectedPackId: string | 'all';
+  searchQuery: string;
+  inStockOnly: boolean;
+  availabilityByOverlayKey: ReadonlyMap<string, OverlayAvailability>;
+}): OverlayPaletteFilterResult {
+  const { orderedPacks, groupedByPackId, selectedPackId, searchQuery, inStockOnly, availabilityByOverlayKey } = params;
+  const q = searchQuery.trim().toLowerCase();
+
+  const matchesOverlay = (pack: OverlayPack, overlay: Overlay): boolean => {
+    if (inStockOnly) {
+      const avail = availabilityByOverlayKey.get(overlayCollectionKey(pack.id, overlay.overlayId));
+      if ((avail?.remaining ?? 0) <= 0) {
+        return false;
+      }
+    }
+    if (!q) return true;
+    return (
+      overlay.label.toLowerCase().includes(q) ||
+      pack.name.toLowerCase().includes(q) ||
+      pack.shortCode.toLowerCase().includes(q)
+    );
+  };
+
+  let totalMatchesAllPacks = 0;
+  if (q) {
+    for (const pack of orderedPacks) {
+      for (const overlay of pack.overlays) {
+        if (matchesOverlay(pack, overlay)) {
+          totalMatchesAllPacks += 1;
+        }
+      }
+    }
+  }
+
+  const sections: OverlayPaletteSection[] = [];
+  for (const pack of orderedPacks) {
+    if (selectedPackId !== 'all' && pack.id !== selectedPackId) continue;
+
+    const baseGroups = groupedByPackId.get(pack.id) ?? groupOverlaysByPrefix(pack.overlays);
+    const filteredGroups: OverlayPrefixGroup[] = [];
+    let totalCount = 0;
+
+    for (const group of baseGroups) {
+      const overlays = group.overlays.filter((ov) => matchesOverlay(pack, ov));
+      if (overlays.length === 0) continue;
+      totalCount += overlays.length;
+      filteredGroups.push({
+        heading: group.name,
+        name: group.name,
+        isOther: group.isOther,
+        overlays,
+      });
+    }
+
+    if (filteredGroups.length === 0) continue;
+    if (filteredGroups.length === 1) {
+      filteredGroups[0].heading = null;
+    }
+
+    sections.push({
+      pack,
+      groups: filteredGroups,
+      totalCount,
+    });
+  }
+
+  return { sections, totalMatchesAllPacks };
 }

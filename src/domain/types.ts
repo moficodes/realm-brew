@@ -105,6 +105,22 @@ export interface BrushSelection {
   rotation: RotationStep;
 }
 
+export interface TileBrushSelection extends BrushSelection {
+  kind: 'tile';
+}
+
+export interface OverlayBrushSelection {
+  kind: 'overlay';
+  overlayPackId: string;
+  overlayId: string;
+  label: string;
+  shortCode: string;
+  url: string;
+  rotationDeg: number;
+}
+
+export type ActiveBrush = TileBrushSelection | OverlayBrushSelection;
+
 export function padFaceNumber(faceNumber: number): string {
   return String(faceNumber).padStart(2, '0');
 }

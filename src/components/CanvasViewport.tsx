@@ -20,14 +20,21 @@ import {
   findPlacementAt,
   formatAssemblyLabel,
 } from '../domain/plannerEngine';
-import type { AxialCoord, BrushSelection, Placement, PlacementKey, Tileset } from '../domain/types';
+import type {
+  ActiveBrush,
+  AxialCoord,
+  Placement,
+  PlacementKey,
+  TileBrushSelection,
+  Tileset,
+} from '../domain/types';
 import { isEditableTarget } from '../utils/browserHelpers';
 
 interface CanvasViewportProps {
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
-  activeBrush: BrushSelection | null;
-  draggingBrush: BrushSelection | null;
+  activeBrush: ActiveBrush | null;
+  draggingBrush: ActiveBrush | null;
   selectedCoord: AxialCoord | null;
   overBudgetCoords: ReadonlySet<PlacementKey>;
   showGrid: boolean;
@@ -36,7 +43,7 @@ interface CanvasViewportProps {
   onCameraChange: Dispatch<SetStateAction<Camera>>;
   onViewportSizeChange: (size: { width: number; height: number }) => void;
   onPlaceAt: (coord: AxialCoord) => void;
-  onDropFaceAt: (coord: AxialCoord, brush: BrushSelection) => void;
+  onDropFaceAt: (coord: AxialCoord, brush: TileBrushSelection) => void;
   onSelectCoord: (coord: AxialCoord | null) => void;
   onMoveOrSwap: (from: AxialCoord, to: AxialCoord) => void;
   onRemoveAt: (coord: AxialCoord) => void;
@@ -164,7 +171,9 @@ export function CanvasViewport({
     return () => canvas.removeEventListener('wheel', onWheel);
   }, [onCameraChange]);
 
-  const previewBrush = draggingBrush ?? activeBrush;
+  const activeTileBrush = activeBrush?.kind === 'tile' ? activeBrush : null;
+  const draggingTileBrush = draggingBrush?.kind === 'tile' ? draggingBrush : null;
+  const previewBrush = draggingTileBrush ?? activeTileBrush;
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -232,7 +241,7 @@ export function CanvasViewport({
   };
 
   const selectedPlacement = selectedCoord ? findPlacementAt(placements, selectedCoord) : undefined;
-  const activeTarget = activeBrush ?? selectedPlacement;
+  const activeTarget = activeTileBrush ?? selectedPlacement;
   const activeTargetLabel = activeTarget
     ? formatAssemblyLabel(activeTarget, tilesetsById)
     : null;
@@ -397,7 +406,7 @@ export function CanvasViewport({
           }
         }}
         onDragOver={(e) => {
-          if (draggingBrush || e.dataTransfer.types.includes('application/x-realm-brew-face')) {
+          if (draggingTileBrush || e.dataTransfer.types.includes('application/x-realm-brew-face')) {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'copy';
             setHoveredCoord(pointerToAxial(e.clientX, e.clientY));
@@ -411,13 +420,14 @@ export function CanvasViewport({
           const coord = pointerToAxial(e.clientX, e.clientY);
           if (!coord) return;
 
-          let dropped: BrushSelection | null = draggingBrush;
+          let dropped: TileBrushSelection | null = draggingTileBrush;
           const raw = e.dataTransfer.getData('application/x-realm-brew-face');
           if (raw) {
             try {
-              dropped = JSON.parse(raw) as BrushSelection;
+              const parsed = JSON.parse(raw) as TileBrushSelection;
+              dropped = { ...parsed, kind: 'tile' };
             } catch {
-              dropped = draggingBrush;
+              dropped = draggingTileBrush;
             }
           }
           if (dropped) {
@@ -433,7 +443,9 @@ export function CanvasViewport({
           if (spacePressed || e.button !== 0) return;
           const coord = pointerToAxial(e.clientX, e.clientY);
           if (activeBrush) {
-            if (coord) onPlaceAt(coord);
+            if (activeBrush.kind === 'tile' && coord) {
+              onPlaceAt(coord);
+            }
             return;
           }
           if (coord && findPlacementAt(placements, coord)) {
