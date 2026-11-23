@@ -17,6 +17,17 @@ import {
   worldToScreen,
   zoomCameraAtScreenPoint,
 } from '../src/domain/hexGeometry';
+import {
+  MISSING_OVERLAY_HEIGHT,
+  MISSING_OVERLAY_WIDTH,
+  OVERLAY_WORLD_PER_PIXEL,
+  clampWorldPointToHostHex,
+  getOverlayWorldSize,
+  overlayLocalToWorld,
+  reprojectOverlayToHost,
+  worldToClampedOverlayLocal,
+  worldToOverlayLocal,
+} from '../src/domain/overlayGeometry';
 import type { Placement } from '../src/domain/types';
 
 describe('Flat-top hex geometry (Seam 2)', () => {
@@ -181,5 +192,126 @@ describe('Flat-top hex geometry (Seam 2)', () => {
     expect(normalizeRotationDeg(-360)).toBe(0);
     expect(normalizeRotationDeg(-1e-17)).toBe(0);
     expect(normalizeRotationDeg(359.5)).toBe(359.5);
+  });
+});
+
+describe('Overlay geometry & host-local transforms (Seam 3)', () => {
+  it('computes fixed 1:1 physical scale (HEX_WIDTH / 1200) and 72x44 missing/loading fallback size', () => {
+    expect(OVERLAY_WORLD_PER_PIXEL).toBeCloseTo(HEX_WIDTH / 1200, 12);
+    expect(MISSING_OVERLAY_WIDTH).toBe(72);
+    expect(MISSING_OVERLAY_HEIGHT).toBe(44);
+
+    // Full hex-sized 1200x1039 image maps 1:1 to HEX_WIDTH x ~HEX_HEIGHT
+    const fullHex = getOverlayWorldSize({ width: 1200, height: 1039 });
+    expect(fullHex.width).toBeCloseTo(HEX_WIDTH, 10);
+    expect(fullHex.height).toBeCloseTo(1039 * (HEX_WIDTH / 1200), 10);
+
+    // Bridge PNG e.g. 600x300 maps 1:1 to 100x50 world units
+    const bridge = getOverlayWorldSize({ width: 600, height: 300 });
+    expect(bridge.width).toBeCloseTo(100, 10);
+    expect(bridge.height).toBeCloseTo(50, 10);
+
+    expect(getOverlayWorldSize(null)).toEqual({ width: 72, height: 44 });
+    expect(getOverlayWorldSize({ width: 0, height: 100 })).toEqual({ width: 72, height: 44 });
+  });
+
+  it('round-trips host-local (offsetX, offsetY, rotationDeg) <-> world space across host rotations without drift', () => {
+    const hosts: Array<Pick<Placement, 'q' | 'r' | 'rotation'>> = [
+      { q: 0, r: 0, rotation: 0 },
+      { q: 1, r: -2, rotation: 1 },
+      { q: -2, r: 3, rotation: 4 },
+      { q: 3, r: 1, rotation: 5 },
+    ];
+    const samples = [
+      { offsetX: 0, offsetY: 0, rotationDeg: 0 },
+      { offsetX: 0.42, offsetY: -0.31, rotationDeg: 47.25 },
+      { offsetX: -0.65, offsetY: 0.25, rotationDeg: 315.75 },
+      { offsetX: 0.5, offsetY: 0, rotationDeg: 359.5 },
+    ];
+
+    for (const host of hosts) {
+      for (const local of samples) {
+        const world = overlayLocalToWorld(host, local);
+        const back = worldToOverlayLocal(host, world.x, world.y, world.worldDeg);
+        expect(back.offsetX).toBeCloseTo(local.offsetX, 10);
+        expect(back.offsetY).toBeCloseTo(local.offsetY, 10);
+        expect(back.rotationDeg).toBeCloseTo(local.rotationDeg, 10);
+      }
+    }
+
+    // Orbit + rotation check: offset (0.5, 0) on host rotation=0 sits at +50 X;
+    // rotating host +1 step (+60°) orbits anchor to (25, 25*sqrt(3)) and worldDeg to 60°
+    const w0 = overlayLocalToWorld({ q: 0, r: 0, rotation: 0 }, { offsetX: 0.5, offsetY: 0, rotationDeg: 15 });
+    expect(w0.x).toBeCloseTo(50, 10);
+    expect(w0.y).toBeCloseTo(0, 10);
+    expect(w0.worldDeg).toBeCloseTo(15, 10);
+
+    const w1 = overlayLocalToWorld({ q: 0, r: 0, rotation: 1 }, { offsetX: 0.5, offsetY: 0, rotationDeg: 15 });
+    expect(w1.x).toBeCloseTo(25, 10);
+    expect(w1.y).toBeCloseTo(25 * Math.sqrt(3), 10);
+    expect(w1.worldDeg).toBeCloseTo(75, 10);
+  });
+
+  it('clamps world anchor points inside the unit flat-top hex while permitting visual overhang', () => {
+    const host = { q: 1, r: 0, rotation: 2 as const };
+    const hostCenter = axialToWorld(host.q, host.r, HEX_RADIUS);
+
+    // Interior point is not clamped
+    const inside = worldToClampedOverlayLocal(host, hostCenter.x + 25, hostCenter.y - 15, 30);
+    expect(inside.clamped).toBe(false);
+    const insideWorld = overlayLocalToWorld(host, inside);
+    expect(insideWorld.x).toBeCloseTo(hostCenter.x + 25, 10);
+    expect(insideWorld.y).toBeCloseTo(hostCenter.y - 15, 10);
+    expect(insideWorld.worldDeg).toBeCloseTo(30, 10);
+
+    // Point far to the right outside the hex clamps cleanly to right vertex (offset +HEX_RADIUS in world)
+    const clampedRight = clampWorldPointToHostHex(hostCenter.x + 250, hostCenter.y, host);
+    expect(clampedRight.clamped).toBe(true);
+    expect(clampedRight.point.x).toBeCloseTo(hostCenter.x + HEX_RADIUS, 10);
+    expect(clampedRight.point.y).toBeCloseTo(hostCenter.y, 10);
+
+    // World point clamped via worldToClampedOverlayLocal produces valid unit-hex offsets even when host is rotated
+    const clampedLocal = worldToClampedOverlayLocal(host, hostCenter.x + 250, hostCenter.y + 200, -45);
+    expect(clampedLocal.clamped).toBe(true);
+    expect(clampedLocal.rotationDeg).toBeCloseTo(normalizeRotationDeg(-45 - host.rotation * 60), 10);
+    const apothem = Math.sqrt(3) / 2;
+    expect(Math.abs(clampedLocal.offsetY)).toBeLessThanOrEqual(apothem + 1e-12);
+    expect(Math.abs(clampedLocal.offsetX) + Math.abs(clampedLocal.offsetY) / Math.sqrt(3)).toBeLessThanOrEqual(
+      1 + 1e-12,
+    );
+
+    // Anchor at right rim + 600px (100u) wide Overlay naturally overhangs neighbor hex by 50u
+    const overhangAnchor = overlayLocalToWorld(
+      { q: 0, r: 0, rotation: 0 },
+      { offsetX: 1, offsetY: 0, rotationDeg: 0 },
+    );
+    const size = getOverlayWorldSize({ width: 600, height: 300 });
+    expect(overhangAnchor.x + size.width / 2).toBeCloseTo(HEX_RADIUS + 50, 10);
+  });
+
+  it('re-projects Overlay local coordinates into a new host Tile rotation frame without visual drift', () => {
+    const oldHost = { q: 2, r: -1, rotation: 1 as const };
+    const newHost = { q: 2, r: -1, rotation: 4 as const };
+    const original = { offsetX: 0.45, offsetY: -0.35, rotationDeg: 27.5 };
+
+    const worldBefore = overlayLocalToWorld(oldHost, original);
+    const reprojected = reprojectOverlayToHost(oldHost, original, newHost);
+    const worldAfter = overlayLocalToWorld(newHost, reprojected);
+
+    expect(worldAfter.x).toBeCloseTo(worldBefore.x, 10);
+    expect(worldAfter.y).toBeCloseTo(worldBefore.y, 10);
+    expect(worldAfter.worldDeg).toBeCloseTo(worldBefore.worldDeg, 10);
+
+    // Boundary anchor re-projection across 60° rotations remains valid inside unit flat-top hex
+    const rimOriginal = { offsetX: 1, offsetY: 0, rotationDeg: 350 };
+    const rimWorldBefore = overlayLocalToWorld(oldHost, rimOriginal);
+    const rimReprojected = reprojectOverlayToHost(oldHost, rimOriginal, newHost);
+    const rimWorldAfter = overlayLocalToWorld(newHost, rimReprojected);
+    expect(rimWorldAfter.x).toBeCloseTo(rimWorldBefore.x, 10);
+    expect(rimWorldAfter.y).toBeCloseTo(rimWorldBefore.y, 10);
+    expect(rimWorldAfter.worldDeg).toBeCloseTo(rimWorldBefore.worldDeg, 10);
+    expect(
+      Math.abs(rimReprojected.offsetX) + Math.abs(rimReprojected.offsetY) / Math.sqrt(3),
+    ).toBeLessThanOrEqual(1 + 1e-12);
   });
 });

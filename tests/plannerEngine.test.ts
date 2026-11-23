@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { HEX_RADIUS, axialToWorld } from '../src/domain/hexGeometry';
+import { overlayLocalToWorld } from '../src/domain/overlayGeometry';
 import {
+  attachOverlayAtWorld,
   buildOverlayPaletteSections,
   canFlipTarget,
   clearMap,
@@ -1027,5 +1030,208 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
     });
     expect(scopedInStockOnly.sections).toHaveLength(0);
     expect(scopedInStockOnly.totalMatchesAllPacks).toBe(0);
+  });
+});
+
+describe('Overlay attach & host-Tile lifecycle engine commands (Seam 2)', () => {
+  const makeOverlayPack = (): OverlayPack => ({
+    id: 'man-hewn-dungeons',
+    name: 'Man Hewn Dungeons',
+    shortCode: 'MHD',
+    pairedTilesetId: 'man-hewn-dungeons',
+    overlays: [
+      {
+        overlayId: 'bridge-1',
+        overlayPackId: 'man-hewn-dungeons',
+        label: 'Bridge 1',
+        filename: 'Bridge 1.png',
+        url: '/api/overlay-assets/man-hewn-dungeons/Bridge%201.png',
+      },
+      {
+        overlayId: 'door-1',
+        overlayPackId: 'man-hewn-dungeons',
+        label: 'Door 1',
+        filename: 'Door 1.png',
+        url: '/api/overlay-assets/man-hewn-dungeons/Door%201.png',
+      },
+    ],
+  });
+
+  it('attaches Overlays freeform onto occupied hexes, clamps to unit hex, stacks in order, updates Collection usage, and blocks empty hexes', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const pack = makeOverlayPack();
+    const collection: Collection = {
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 2 },
+      overlayPacks: { 'man-hewn-dungeons': 1 },
+    };
+
+    const initial: Placement[] = [
+      { q: 1, r: -1, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 2 },
+    ];
+
+    // Empty hex space is blocked without mutating Map
+    const emptyCenter = axialToWorld(0, 0, HEX_RADIUS);
+    const blocked = attachOverlayAtWorld(
+      initial,
+      { q: 0, r: 0 },
+      { overlayPackId: pack.id, overlayId: 'bridge-1', rotationDeg: 35 },
+      emptyCenter.x,
+      emptyCenter.y,
+    );
+    expect(blocked.createdOverlay).toBeNull();
+    expect(blocked.placements).toEqual(initial);
+
+    // Occupied hex freeform placement (exact pointer world pos, no center/spoke snap)
+    const hostCenter = axialToWorld(1, -1, HEX_RADIUS);
+    const first = attachOverlayAtWorld(
+      initial,
+      { q: 1, r: -1 },
+      { overlayPackId: pack.id, overlayId: 'bridge-1', rotationDeg: 22.5 },
+      hostCenter.x + 17,
+      hostCenter.y - 29,
+    );
+    expect(first.createdOverlay).not.toBeNull();
+    const firstOv = first.createdOverlay!;
+    const firstWorld = overlayLocalToWorld(first.placements[0], firstOv);
+    expect(firstWorld.x).toBeCloseTo(hostCenter.x + 17, 10);
+    expect(firstWorld.y).toBeCloseTo(hostCenter.y - 29, 10);
+    expect(firstWorld.worldDeg).toBeCloseTo(22.5, 10);
+
+    // Second placement of the same Overlay outside rim clamps anchor to unit hex, appends on top, generates unique ID, and triggers over-budget
+    const second = attachOverlayAtWorld(
+      first.placements,
+      { q: 1, r: -1 },
+      { overlayPackId: pack.id, overlayId: 'bridge-1', rotationDeg: 90 },
+      hostCenter.x + 300,
+      hostCenter.y,
+    );
+    expect(second.createdOverlay).not.toBeNull();
+    const secondOv = second.createdOverlay!;
+    expect(secondOv.id).not.toBe(firstOv.id);
+    const hostOverlays = second.placements[0].overlays ?? [];
+    expect(hostOverlays).toHaveLength(2);
+    expect(hostOverlays[0].id).toBe(firstOv.id);
+    expect(hostOverlays[1].id).toBe(secondOv.id);
+
+    const clampedWorld = overlayLocalToWorld(second.placements[0], secondOv);
+    expect(clampedWorld.x).toBeCloseTo(hostCenter.x + HEX_RADIUS, 10);
+    expect(clampedWorld.y).toBeCloseTo(hostCenter.y, 10);
+
+    const usage = computeCollectionUsage(second.placements, [mhd], collection, [pack]);
+    expect(usage.byOverlayKey.get(overlayCollectionKey(pack.id, 'bridge-1'))).toMatchObject({
+      owned: 1,
+      used: 2,
+      remaining: -1,
+      isOverBudget: true,
+    });
+    expect(usage.overBudgetOverlayIds).toEqual(new Set([firstOv.id, secondOv.id]));
+  });
+
+  it('carries Overlays on move/swap, orbits+rotates on host rotate, keeps on flip, re-projects on replace, and removes atomically with Undo', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const sr = makeTestTileset('subterranean-rivers', 'SR');
+
+    const initial: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          {
+            id: 'ov-a',
+            overlayPackId: 'man-hewn-dungeons',
+            overlayId: 'bridge-1',
+            offsetX: 0.5,
+            offsetY: 0,
+            rotationDeg: 15,
+          },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: sr.id,
+        tileId: '03-04',
+        faceNumber: 3,
+        rotation: 1,
+        overlays: [
+          {
+            id: 'ov-b',
+            overlayPackId: 'man-hewn-dungeons',
+            overlayId: 'door-1',
+            offsetX: -0.25,
+            offsetY: 0.25,
+            rotationDeg: 90,
+          },
+        ],
+      },
+    ];
+
+    // 1. Rotate host Placement (+60°): rotates & orbits Overlay together with Tile artwork
+    const rotated = rotatePlacement(initial, { q: 0, r: 0 }, 1);
+    const rotatedHost = rotated.find((p) => p.q === 0 && p.r === 0)!;
+    expect(rotatedHost.rotation).toBe(1);
+    const rotatedWorld = overlayLocalToWorld(rotatedHost, rotatedHost.overlays![0]);
+    expect(rotatedWorld.x).toBeCloseTo(25, 10);
+    expect(rotatedWorld.y).toBeCloseTo(25 * Math.sqrt(3), 10);
+    expect(rotatedWorld.worldDeg).toBeCloseTo(75, 10);
+
+    // 2. Flip host Tile: leaves attached Overlays intact
+    const flipped = flipPlacement(rotated, { q: 0, r: 0 }, [mhd, sr]);
+    const flippedHost = flipped.find((p) => p.q === 0 && p.r === 0)!;
+    expect(flippedHost.faceNumber).toBe(2);
+    expect(flippedHost.overlays).toEqual(rotatedHost.overlays);
+
+    // 3. Overwrite / replace host Tile with different Tile and different rotation:
+    // preserves attached Overlays at exact visual world position & angle, preserves covered, preserves draw slot
+    const worldBeforeReplace = overlayLocalToWorld(flippedHost, flippedHost.overlays![0]);
+    const replaced = placeTile(flipped, {
+      q: 0,
+      r: 0,
+      tilesetId: sr.id,
+      tileId: '01-02',
+      faceNumber: 1,
+      rotation: 4,
+    });
+    expect(replaced[0].q).toBe(0);
+    expect(replaced[0].r).toBe(0);
+    expect(replaced[0].tilesetId).toBe(sr.id);
+    expect(replaced[0].rotation).toBe(4);
+    expect(replaced[0].covered).toBe(true);
+    expect(replaced[0].overlays).toHaveLength(1);
+    const worldAfterReplace = overlayLocalToWorld(replaced[0], replaced[0].overlays![0]);
+    expect(worldAfterReplace.x).toBeCloseTo(worldBeforeReplace.x, 10);
+    expect(worldAfterReplace.y).toBeCloseTo(worldBeforeReplace.y, 10);
+    expect(worldAfterReplace.worldDeg).toBeCloseTo(worldBeforeReplace.worldDeg, 10);
+
+    // 4. Move to empty hex & swap occupied hexes carries attached Overlays
+    const movedToEmpty = moveOrSwapPlacement(replaced, { q: 0, r: 0 }, { q: 0, r: 2 });
+    expect(movedToEmpty.find((p) => p.q === 0 && p.r === 2)?.overlays?.[0].id).toBe('ov-a');
+    const swapped = moveOrSwapPlacement(movedToEmpty, { q: 0, r: 2 }, { q: 1, r: 0 });
+    expect(swapped.find((p) => p.q === 1 && p.r === 0)?.overlays?.[0].id).toBe('ov-a');
+    expect(swapped.find((p) => p.q === 0 && p.r === 2)?.overlays?.[0].id).toBe('ov-b');
+
+    // 5. Deleting a host Placement deletes attached Overlays atomically in one Undo step
+    let history = createHistory(swapped);
+    history = commitHistory(history, removePlacement(history.present, { q: 1, r: 0 }));
+    expect(history.present).toHaveLength(1);
+    expect(history.present.find((p) => p.q === 1 && p.r === 0)).toBeUndefined();
+
+    history = undoHistory(history);
+    expect(history.present).toHaveLength(2);
+    expect(history.present.find((p) => p.q === 1 && p.r === 0)?.overlays?.[0].id).toBe('ov-a');
+
+    // 6. Clearing Map deletes all hosts & Overlays atomically in one Undo step
+    history = commitHistory(history, clearMap());
+    expect(history.present).toEqual([]);
+    history = undoHistory(history);
+    expect(history.present).toHaveLength(2);
+    expect(history.present.find((p) => p.q === 1 && p.r === 0)?.overlays?.[0].id).toBe('ov-a');
+    expect(history.present.find((p) => p.q === 0 && p.r === 2)?.overlays?.[0].id).toBe('ov-b');
   });
 });

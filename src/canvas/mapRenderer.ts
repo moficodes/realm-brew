@@ -7,17 +7,29 @@ import {
   hexCorners,
   rotationToRadians,
   screenToWorld,
+  worldToAxial,
   type Camera,
+  type Point2D,
 } from '../domain/hexGeometry';
+import {
+  MISSING_OVERLAY_HEIGHT,
+  MISSING_OVERLAY_WIDTH,
+  clampWorldPointToHostHex,
+  getOverlayWorldSize,
+  overlayLocalToWorld,
+} from '../domain/overlayGeometry';
 import {
   findPlacementAt,
   formatAssemblyLabel,
+  resolveOverlayAsset,
   resolvePlacementAsset,
 } from '../domain/plannerEngine';
 import {
   padFaceNumber,
+  type ActiveBrush,
   type AxialCoord,
-  type BrushSelection,
+  type OverlayPack,
+  type OverlayPlacement,
   type Placement,
   type PlacementKey,
   type RotationStep,
@@ -43,12 +55,14 @@ export interface ViewportRenderParams {
   camera: Camera;
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
+  overlayPacksById: ReadonlyMap<string, OverlayPack>;
   imageCache: ImageLookup;
   showGrid: boolean;
   showLabels: boolean;
   hoveredCoord: AxialCoord | null;
+  hoveredWorldPos?: Point2D | null;
   selectedCoord: AxialCoord | null;
-  activeBrush: BrushSelection | null;
+  activeBrush: ActiveBrush | null;
   overBudgetCoords: ReadonlySet<PlacementKey>;
   dragMove: DragMovePreview | null;
 }
@@ -291,6 +305,227 @@ function drawOverBudgetOutline(
   ctx.restore();
 }
 
+function drawMissingOverlayPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  wx: number,
+  wy: number,
+  worldRad: number,
+  overlayId: string,
+  alpha = 1,
+): void {
+  const w = MISSING_OVERLAY_WIDTH;
+  const h = MISSING_OVERLAY_HEIGHT;
+
+  // Rotated 72x44 dashed amber rounded-rectangle placeholder
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.rotate(worldRad);
+  ctx.globalAlpha = alpha;
+  drawRoundedRect(ctx, -w / 2, -h / 2, w, h, 6);
+  ctx.fillStyle = 'rgba(41, 33, 35, 0.92)';
+  ctx.fill();
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = 'rgba(245, 158, 11, 0.85)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+
+  // Upright amber warning badge + truncated <overlayId> label
+  const truncatedId = overlayId.length > 10 ? `${overlayId.slice(0, 9)}…` : overlayId;
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.globalAlpha = alpha;
+
+  ctx.beginPath();
+  ctx.arc(0, -9, 6.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#f59e0b';
+  ctx.fill();
+  ctx.fillStyle = '#161412';
+  ctx.font = '800 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('!', 0, -8.5);
+
+  ctx.font = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const textWidth = ctx.measureText(truncatedId).width;
+  const pillW = Math.max(textWidth + 8, 28);
+  drawRoundedRect(ctx, -pillW / 2, 2, pillW, 15, 4);
+  ctx.fillStyle = 'rgba(22, 20, 18, 0.88)';
+  ctx.fill();
+  ctx.fillStyle = '#fde68a';
+  ctx.fillText(truncatedId, 0, 10);
+  ctx.restore();
+}
+
+function drawLoadingOverlayBox(
+  ctx: CanvasRenderingContext2D,
+  wx: number,
+  wy: number,
+  worldRad: number,
+  alpha = 1,
+): void {
+  const w = MISSING_OVERLAY_WIDTH;
+  const h = MISSING_OVERLAY_HEIGHT;
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.rotate(worldRad);
+  ctx.globalAlpha = alpha;
+  drawRoundedRect(ctx, -w / 2, -h / 2, w, h, 6);
+  ctx.fillStyle = '#2d2823';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(168, 162, 158, 0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawOverlayPlacementGraphic(
+  ctx: CanvasRenderingContext2D,
+  wx: number,
+  wy: number,
+  worldRad: number,
+  overlay: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'>,
+  overlayPacksById: ReadonlyMap<string, OverlayPack>,
+  imageCache: ImageLookup,
+  alpha = 1,
+): void {
+  const asset = resolveOverlayAsset(overlay, overlayPacksById);
+  if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
+    drawMissingOverlayPlaceholder(ctx, wx, wy, worldRad, overlay.overlayId, alpha);
+    return;
+  }
+
+  const img = imageCache.get(asset.url);
+  if (!img) {
+    drawLoadingOverlayBox(ctx, wx, wy, worldRad, alpha);
+    return;
+  }
+  if (img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+    drawMissingOverlayPlaceholder(ctx, wx, wy, worldRad, overlay.overlayId, alpha);
+    return;
+  }
+
+  const { width, height } = getOverlayWorldSize({
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+  });
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.rotate(worldRad);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(img, -width / 2, -height / 2, width, height);
+  ctx.restore();
+}
+
+/** Pass 3: Render all Overlay Placements globally above all Tiles in deterministic host/stack order. */
+export function drawGlobalOverlaysPass(params: {
+  ctx: CanvasRenderingContext2D;
+  placements: readonly Placement[];
+  overlayPacksById: ReadonlyMap<string, OverlayPack>;
+  imageCache: ImageLookup;
+  dragMove?: DragMovePreview | null;
+}): void {
+  const { ctx, placements, overlayPacksById, imageCache, dragMove = null } = params;
+
+  for (const host of placements) {
+    const isDragOrigin =
+      dragMove !== null && host.q === dragMove.from.q && host.r === dragMove.from.r;
+    if (isDragOrigin && dragMove.to) {
+      continue;
+    }
+
+    const alpha = isDragOrigin ? 0.28 : 1;
+    for (const ov of host.overlays ?? []) {
+      const t = overlayLocalToWorld(host, ov);
+      drawOverlayPlacementGraphic(ctx, t.x, t.y, t.worldRad, ov, overlayPacksById, imageCache, alpha);
+    }
+  }
+
+  if (dragMove && dragMove.to) {
+    const movingHost = findPlacementAt(placements, dragMove.from);
+    if (movingHost && movingHost.overlays && movingHost.overlays.length > 0) {
+      const previewHost: Placement = {
+        ...movingHost,
+        q: dragMove.to.q,
+        r: dragMove.to.r,
+      };
+      for (const ov of movingHost.overlays) {
+        const t = overlayLocalToWorld(previewHost, ov);
+        drawOverlayPlacementGraphic(ctx, t.x, t.y, t.worldRad, ov, overlayPacksById, imageCache, 0.72);
+      }
+    }
+  }
+}
+
+function drawWorldBadge(
+  ctx: CanvasRenderingContext2D,
+  wx: number,
+  wy: number,
+  text: string,
+  bgColor: string,
+  borderColor: string,
+  textColor: string,
+  zoom: number,
+): void {
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.scale(1 / zoom, 1 / zoom);
+  ctx.font = '600 11px ui-sans-serif, system-ui, sans-serif';
+  const tw = ctx.measureText(text).width;
+  const pw = tw + 14;
+  const ph = 22;
+  drawRoundedRect(ctx, -pw / 2, -ph / 2, pw, ph, 6);
+  ctx.fillStyle = bgColor;
+  ctx.fill();
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = textColor;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 0, 0.5);
+  ctx.restore();
+}
+
+function drawOverlayBrushGhost(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement | null,
+  wx: number,
+  wy: number,
+  worldDeg: number,
+  alpha: number,
+  tintInvalid: boolean,
+): void {
+  const { width, height } =
+    img && img.naturalWidth > 0 && img.naturalHeight > 0
+      ? getOverlayWorldSize({ width: img.naturalWidth, height: img.naturalHeight })
+      : getOverlayWorldSize(null);
+  const worldRad = (worldDeg * Math.PI) / 180;
+
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.rotate(worldRad);
+  ctx.globalAlpha = alpha;
+
+  if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+    ctx.drawImage(img, -width / 2, -height / 2, width, height);
+    if (tintInvalid) {
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
+      ctx.fillRect(-width / 2, -height / 2, width, height);
+    }
+  } else {
+    drawRoundedRect(ctx, -width / 2, -height / 2, width, height, 6);
+    ctx.fillStyle = tintInvalid ? 'rgba(239, 68, 68, 0.22)' : 'rgba(56, 189, 248, 0.2)';
+    ctx.fill();
+  }
+
+  ctx.strokeStyle = tintInvalid ? '#ef4444' : '#38bdf8';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(-width / 2, -height / 2, width, height);
+  ctx.restore();
+}
+
 export function renderMapViewport({
   ctx,
   width,
@@ -298,10 +533,12 @@ export function renderMapViewport({
   camera,
   placements,
   tilesetsById,
+  overlayPacksById,
   imageCache,
   showGrid,
   showLabels,
   hoveredCoord,
+  hoveredWorldPos = null,
   selectedCoord,
   activeBrush,
   overBudgetCoords,
@@ -319,6 +556,7 @@ export function renderMapViewport({
     drawHexGrid(ctx, width, height, camera);
   }
 
+  // Pass 2: Base Tiles & missing-Tile placeholders
   for (const placement of placements) {
     const isDragOrigin =
       dragMove !== null &&
@@ -340,32 +578,9 @@ export function renderMapViewport({
     if (!isDragOrigin && isOverBudget) {
       drawOverBudgetOutline(ctx, x, y, camera.zoom);
     }
-
-    if (!isDragOrigin && showLabels) {
-      drawAssemblyLabel(
-        ctx,
-        x,
-        y,
-        placement.rotation,
-        formatAssemblyLabel(placement, tilesetsById),
-        isOverBudget,
-      );
-    }
   }
 
-  if (selectedCoord && !dragMove) {
-    const selectedPlacement = findPlacementAt(placements, selectedCoord);
-    if (selectedPlacement) {
-      const { x, y } = axialToWorld(selectedPlacement.q, selectedPlacement.r, HEX_RADIUS);
-      ctx.save();
-      traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
-      ctx.strokeStyle = '#f59e0b';
-      ctx.lineWidth = Math.max(3, 3.5 / camera.zoom);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
+  // Dragged Tile destination preview belongs in Pass 2 beneath Pass 3 Overlays
   if (dragMove && dragMove.to) {
     const moving = findPlacementAt(placements, dragMove.from);
     if (moving) {
@@ -382,24 +597,139 @@ export function renderMapViewport({
       ctx.stroke();
       ctx.restore();
     }
-  } else if (hoveredCoord && activeBrush) {
-    const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
-    drawPlacementGraphic(ctx, x, y, activeBrush, tilesetsById, imageCache, 0.55);
+  }
 
-    ctx.save();
-    traceHexPath(ctx, x, y, HEX_RADIUS - 1);
-    ctx.strokeStyle = '#fbbf24';
-    ctx.lineWidth = 2 / camera.zoom;
-    ctx.stroke();
-    ctx.restore();
-  } else if (hoveredCoord) {
-    const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
-    ctx.save();
-    traceHexPath(ctx, x, y, HEX_RADIUS - 1);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 1.5 / camera.zoom;
-    ctx.stroke();
-    ctx.restore();
+  // Pass 3: Global Overlay Placements above all Tiles
+  drawGlobalOverlaysPass({
+    ctx,
+    placements,
+    overlayPacksById,
+    imageCache,
+    dragMove,
+  });
+
+  if (selectedCoord && !dragMove) {
+    const selectedPlacement = findPlacementAt(placements, selectedCoord);
+    if (selectedPlacement) {
+      const { x, y } = axialToWorld(selectedPlacement.q, selectedPlacement.r, HEX_RADIUS);
+      ctx.save();
+      traceHexPath(ctx, x, y, HEX_RADIUS - 1.5);
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = Math.max(3, 3.5 / camera.zoom);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  if (!dragMove) {
+    if (activeBrush?.kind === 'tile' && hoveredCoord) {
+      const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
+      drawPlacementGraphic(ctx, x, y, activeBrush, tilesetsById, imageCache, 0.55);
+
+      ctx.save();
+      traceHexPath(ctx, x, y, HEX_RADIUS - 1);
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2 / camera.zoom;
+      ctx.stroke();
+      ctx.restore();
+    } else if (activeBrush?.kind === 'overlay') {
+      const pointerWorld =
+        hoveredWorldPos ?? (hoveredCoord ? axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS) : null);
+      const targetCoord =
+        hoveredCoord ?? (pointerWorld ? worldToAxial(pointerWorld.x, pointerWorld.y, HEX_RADIUS) : null);
+
+      if (pointerWorld && targetCoord) {
+        const host = findPlacementAt(placements, targetCoord);
+        const brushImg = imageCache.isError(activeBrush.url) ? null : imageCache.get(activeBrush.url);
+        const hexCenter = axialToWorld(targetCoord.q, targetCoord.r, HEX_RADIUS);
+
+        if (host) {
+          const { point } = clampWorldPointToHostHex(
+            pointerWorld.x,
+            pointerWorld.y,
+            targetCoord,
+            HEX_RADIUS,
+          );
+          ctx.save();
+          traceHexPath(ctx, hexCenter.x, hexCenter.y, HEX_RADIUS - 1.5);
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
+          ctx.lineWidth = Math.max(1.5, 2 / camera.zoom);
+          ctx.stroke();
+          ctx.restore();
+
+          drawOverlayBrushGhost(
+            ctx,
+            brushImg,
+            point.x,
+            point.y,
+            activeBrush.rotationDeg,
+            0.68,
+            false,
+          );
+        } else {
+          ctx.save();
+          traceHexPath(ctx, hexCenter.x, hexCenter.y, HEX_RADIUS - 1.5);
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
+          ctx.fill();
+          ctx.setLineDash([7, 5]);
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.9)';
+          ctx.lineWidth = Math.max(2, 2.5 / camera.zoom);
+          ctx.stroke();
+          ctx.restore();
+
+          drawOverlayBrushGhost(
+            ctx,
+            brushImg,
+            pointerWorld.x,
+            pointerWorld.y,
+            activeBrush.rotationDeg,
+            0.55,
+            true,
+          );
+
+          drawWorldBadge(
+            ctx,
+            hexCenter.x,
+            hexCenter.y + 42,
+            'Place a Tile first',
+            'rgba(69, 10, 10, 0.92)',
+            'rgba(239, 68, 68, 0.75)',
+            '#fecaca',
+            camera.zoom,
+          );
+        }
+      }
+    } else if (hoveredCoord) {
+      const { x, y } = axialToWorld(hoveredCoord.q, hoveredCoord.r, HEX_RADIUS);
+      ctx.save();
+      traceHexPath(ctx, x, y, HEX_RADIUS - 1);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+      ctx.lineWidth = 1.5 / camera.zoom;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Pass 5: Assembly Labels above Tiles & Overlays
+  if (showLabels) {
+    for (const placement of placements) {
+      const isDragOrigin =
+        dragMove !== null &&
+        placement.q === dragMove.from.q &&
+        placement.r === dragMove.from.r;
+      if (isDragOrigin) continue;
+
+      const isOverBudget = overBudgetCoords.has(axialKey(placement.q, placement.r));
+      const { x, y } = axialToWorld(placement.q, placement.r, HEX_RADIUS);
+      drawAssemblyLabel(
+        ctx,
+        x,
+        y,
+        placement.rotation,
+        formatAssemblyLabel(placement, tilesetsById),
+        isOverBudget,
+      );
+    }
   }
 
   ctx.restore();

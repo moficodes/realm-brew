@@ -22,9 +22,11 @@ import {
   DEFAULT_CAMERA,
   clampZoom,
   computeFitCamera,
+  normalizeRotationDeg,
   type Camera,
 } from './domain/hexGeometry';
 import {
+  attachOverlayAtWorld,
   clearMap,
   commitHistory,
   compactPlacement,
@@ -52,6 +54,7 @@ import type {
   Collection,
   MapDocument,
   MapSummary,
+  OverlayBrushSelection,
   OverlayPack,
   Placement,
   TileBrushSelection,
@@ -404,6 +407,43 @@ export function App() {
     [activeBrush, commitPlacements],
   );
 
+  const handlePlaceOverlayAt = useCallback(
+    (
+      coord: AxialCoord,
+      worldX: number,
+      worldY: number,
+      brushOverride?: OverlayBrushSelection,
+    ) => {
+      const brush = brushOverride ?? (activeBrush?.kind === 'overlay' ? activeBrush : null);
+      if (!brush) return;
+
+      const current = historyRef.current.present;
+      const { placements: next, createdOverlay } = attachOverlayAtWorld(
+        current,
+        coord,
+        brush,
+        worldX,
+        worldY,
+      );
+      if (!createdOverlay) return;
+
+      const nextHistory = commitHistory(historyRef.current, next);
+      historyRef.current = nextHistory;
+      setHistory(nextHistory);
+
+      const currentMap = activeMapRef.current;
+      if (currentMap) {
+        scheduleAutoSave(currentMap.id, currentMap.name, next);
+      }
+
+      if (brushOverride) {
+        setActiveBrush(null);
+        setSelectedCoord(coord);
+      }
+    },
+    [activeBrush, scheduleAutoSave],
+  );
+
   const handleRotateAction = useCallback(
     (delta: 1 | -1) => {
       if (activeBrush) {
@@ -411,6 +451,12 @@ export function App() {
           setActiveBrush((prev) =>
             prev && prev.kind === 'tile'
               ? { ...prev, rotation: rotateStep(prev.rotation, delta) }
+              : prev,
+          );
+        } else {
+          setActiveBrush((prev) =>
+            prev && prev.kind === 'overlay'
+              ? { ...prev, rotationDeg: normalizeRotationDeg(prev.rotationDeg + delta * 60) }
               : prev,
           );
         }
@@ -660,6 +706,7 @@ export function App() {
         <CanvasViewport
           placements={placements}
           tilesetsById={tilesetsById}
+          overlayPacksById={overlayPacksById}
           activeBrush={activeBrush}
           draggingBrush={draggingBrush}
           selectedCoord={selectedCoord}
@@ -671,6 +718,8 @@ export function App() {
           onViewportSizeChange={handleViewportSizeChange}
           onPlaceAt={(coord) => handlePlaceAt(coord)}
           onDropFaceAt={(coord, brush) => handlePlaceAt(coord, brush)}
+          onPlaceOverlayAt={(coord, wx, wy) => handlePlaceOverlayAt(coord, wx, wy)}
+          onDropOverlayAt={(coord, wx, wy, brush) => handlePlaceOverlayAt(coord, wx, wy, brush)}
           onSelectCoord={setSelectedCoord}
           onMoveOrSwap={handleMoveOrSwap}
           onRemoveAt={handleRemoveAt}

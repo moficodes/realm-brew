@@ -11,9 +11,11 @@ import { TileImageCache } from '../canvas/imageCache';
 import { renderMapViewport, type DragMovePreview } from '../canvas/mapRenderer';
 import {
   HEX_RADIUS,
-  screenToAxial,
+  screenToWorld,
+  worldToAxial,
   zoomCameraAtScreenPoint,
   type Camera,
+  type Point2D,
 } from '../domain/hexGeometry';
 import {
   canFlipTarget,
@@ -23,6 +25,8 @@ import {
 import type {
   ActiveBrush,
   AxialCoord,
+  OverlayBrushSelection,
+  OverlayPack,
   Placement,
   PlacementKey,
   TileBrushSelection,
@@ -33,6 +37,7 @@ import { isEditableTarget } from '../utils/browserHelpers';
 interface CanvasViewportProps {
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
+  overlayPacksById: ReadonlyMap<string, OverlayPack>;
   activeBrush: ActiveBrush | null;
   draggingBrush: ActiveBrush | null;
   selectedCoord: AxialCoord | null;
@@ -44,6 +49,13 @@ interface CanvasViewportProps {
   onViewportSizeChange: (size: { width: number; height: number }) => void;
   onPlaceAt: (coord: AxialCoord) => void;
   onDropFaceAt: (coord: AxialCoord, brush: TileBrushSelection) => void;
+  onPlaceOverlayAt: (coord: AxialCoord, worldX: number, worldY: number) => void;
+  onDropOverlayAt: (
+    coord: AxialCoord,
+    worldX: number,
+    worldY: number,
+    brush: OverlayBrushSelection,
+  ) => void;
   onSelectCoord: (coord: AxialCoord | null) => void;
   onMoveOrSwap: (from: AxialCoord, to: AxialCoord) => void;
   onRemoveAt: (coord: AxialCoord) => void;
@@ -54,6 +66,7 @@ interface CanvasViewportProps {
 export function CanvasViewport({
   placements,
   tilesetsById,
+  overlayPacksById,
   activeBrush,
   draggingBrush,
   selectedCoord,
@@ -65,6 +78,8 @@ export function CanvasViewport({
   onViewportSizeChange,
   onPlaceAt,
   onDropFaceAt,
+  onPlaceOverlayAt,
+  onDropOverlayAt,
   onSelectCoord,
   onMoveOrSwap,
   onRemoveAt,
@@ -79,6 +94,7 @@ export function CanvasViewport({
   }
 
   const [hoveredCoord, setHoveredCoord] = useState<AxialCoord | null>(null);
+  const [hoveredWorldPos, setHoveredWorldPos] = useState<Point2D | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [renderTick, setRenderTick] = useState(0);
   const [spacePressed, setSpacePressed] = useState(false);
@@ -171,9 +187,18 @@ export function CanvasViewport({
     return () => canvas.removeEventListener('wheel', onWheel);
   }, [onCameraChange]);
 
+  const prevDraggingBrushRef = useRef<ActiveBrush | null>(null);
+  useEffect(() => {
+    if (prevDraggingBrushRef.current && !draggingBrush) {
+      setHoveredCoord(null);
+      setHoveredWorldPos(null);
+    }
+    prevDraggingBrushRef.current = draggingBrush;
+  }, [draggingBrush]);
+
   const activeTileBrush = activeBrush?.kind === 'tile' ? activeBrush : null;
-  const draggingTileBrush = draggingBrush?.kind === 'tile' ? draggingBrush : null;
-  const previewBrush = draggingTileBrush ?? activeTileBrush;
+  const activeOverlayBrush = activeBrush?.kind === 'overlay' ? activeBrush : null;
+  const previewBrush = draggingBrush ?? activeBrush;
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -198,10 +223,12 @@ export function CanvasViewport({
       camera,
       placements,
       tilesetsById,
+      overlayPacksById,
       imageCache: imageCacheRef.current!,
       showGrid,
       showLabels,
       hoveredCoord,
+      hoveredWorldPos,
       selectedCoord,
       activeBrush: previewBrush,
       overBudgetCoords,
@@ -212,9 +239,11 @@ export function CanvasViewport({
     camera,
     placements,
     tilesetsById,
+    overlayPacksById,
     showGrid,
     showLabels,
     hoveredCoord,
+    hoveredWorldPos,
     selectedCoord,
     previewBrush,
     overBudgetCoords,
@@ -226,18 +255,22 @@ export function CanvasViewport({
     draw();
   }, [draw]);
 
-  const pointerToAxial = (clientX: number, clientY: number): AxialCoord | null => {
+  const pointerToWorld = (clientX: number, clientY: number): Point2D | null => {
     const canvas = canvasRef.current;
     if (!canvas || size.width <= 0 || size.height <= 0) return null;
     const rect = canvas.getBoundingClientRect();
-    return screenToAxial(
+    return screenToWorld(
       clientX - rect.left,
       clientY - rect.top,
       size.width,
       size.height,
       cameraRef.current,
-      HEX_RADIUS,
     );
+  };
+
+  const pointerToAxial = (clientX: number, clientY: number): AxialCoord | null => {
+    const world = pointerToWorld(clientX, clientY);
+    return world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
   };
 
   const selectedPlacement = selectedCoord ? findPlacementAt(placements, selectedCoord) : undefined;
@@ -246,6 +279,9 @@ export function CanvasViewport({
     ? formatAssemblyLabel(activeTarget, tilesetsById)
     : null;
   const canFlipActiveTarget = activeTarget ? canFlipTarget(activeTarget, tilesetsById) : false;
+  const overlayBrushLabel = activeOverlayBrush
+    ? `${overlayPacksById.get(activeOverlayBrush.overlayPackId)?.shortCode ?? activeOverlayBrush.shortCode} ${activeOverlayBrush.label}`
+    : null;
 
   const scheduleClickSuppressionClear = () => {
     suppressNextClickRef.current = true;
@@ -260,11 +296,15 @@ export function CanvasViewport({
       ? 'cursor-grabbing'
       : spacePressed
         ? 'cursor-grab'
-        : activeBrush
-          ? 'cursor-crosshair'
-          : hoveredCoord && findPlacementAt(placements, hoveredCoord)
-            ? 'cursor-grab'
-            : 'cursor-default';
+        : activeOverlayBrush
+          ? hoveredCoord && !findPlacementAt(placements, hoveredCoord)
+            ? 'cursor-not-allowed'
+            : 'cursor-crosshair'
+          : activeBrush
+            ? 'cursor-crosshair'
+            : hoveredCoord && findPlacementAt(placements, hoveredCoord)
+              ? 'cursor-grab'
+              : 'cursor-default';
 
   return (
     <div ref={containerRef} className="relative h-full flex-1 overflow-hidden bg-[#221f1c]">
@@ -346,7 +386,10 @@ export function CanvasViewport({
             return;
           }
 
-          setHoveredCoord(pointerToAxial(e.clientX, e.clientY));
+          const world = pointerToWorld(e.clientX, e.clientY);
+          const coord = world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
+          setHoveredCoord(coord);
+          setHoveredWorldPos(world);
         }}
         onPointerUp={(e) => {
           const pan = panStateRef.current;
@@ -396,6 +439,7 @@ export function CanvasViewport({
         onPointerLeave={() => {
           if (!panStateRef.current && !moveCandidateRef.current) {
             setHoveredCoord(null);
+            setHoveredWorldPos(null);
           }
         }}
         onContextMenu={(e) => {
@@ -406,34 +450,74 @@ export function CanvasViewport({
           }
         }}
         onDragOver={(e) => {
-          if (draggingTileBrush || e.dataTransfer.types.includes('application/x-realm-brew-face')) {
+          const isOverlayDrag =
+            draggingBrush?.kind === 'overlay' ||
+            e.dataTransfer.types.includes('application/x-realm-brew-overlay');
+          const isTileDrag =
+            draggingBrush?.kind === 'tile' ||
+            e.dataTransfer.types.includes('application/x-realm-brew-face');
+
+          if (isOverlayDrag || isTileDrag) {
             e.preventDefault();
-            e.dataTransfer.dropEffect = 'copy';
-            setHoveredCoord(pointerToAxial(e.clientX, e.clientY));
+            const world = pointerToWorld(e.clientX, e.clientY);
+            const coord = world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
+            setHoveredCoord(coord);
+            setHoveredWorldPos(world);
+            if (isOverlayDrag) {
+              const occupied = coord ? Boolean(findPlacementAt(placements, coord)) : false;
+              e.dataTransfer.dropEffect = occupied ? 'copy' : 'none';
+            } else {
+              e.dataTransfer.dropEffect = 'copy';
+            }
           }
         }}
         onDragLeave={() => {
           setHoveredCoord(null);
+          setHoveredWorldPos(null);
         }}
         onDrop={(e) => {
           e.preventDefault();
-          const coord = pointerToAxial(e.clientX, e.clientY);
-          if (!coord) return;
+          const world = pointerToWorld(e.clientX, e.clientY);
+          const coord = world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
+          setHoveredCoord(null);
+          setHoveredWorldPos(null);
+          if (!world || !coord) return;
 
-          let dropped: TileBrushSelection | null = draggingTileBrush;
-          const raw = e.dataTransfer.getData('application/x-realm-brew-face');
-          if (raw) {
+          const isOverlayDrop =
+            e.dataTransfer.types.includes('application/x-realm-brew-overlay') ||
+            draggingBrush?.kind === 'overlay';
+          if (isOverlayDrop) {
+            let droppedOverlay: OverlayBrushSelection | null =
+              draggingBrush?.kind === 'overlay' ? draggingBrush : null;
+            const rawOverlay = e.dataTransfer.getData('application/x-realm-brew-overlay');
+            if (rawOverlay) {
+              try {
+                const parsed = JSON.parse(rawOverlay) as OverlayBrushSelection;
+                droppedOverlay = { ...parsed, kind: 'overlay' };
+              } catch {
+                // Keep draggingBrush fallback
+              }
+            }
+            if (droppedOverlay && findPlacementAt(placements, coord)) {
+              onDropOverlayAt(coord, world.x, world.y, droppedOverlay);
+            }
+            return;
+          }
+
+          let droppedTile: TileBrushSelection | null =
+            draggingBrush?.kind === 'tile' ? draggingBrush : null;
+          const rawFace = e.dataTransfer.getData('application/x-realm-brew-face');
+          if (rawFace) {
             try {
-              const parsed = JSON.parse(raw) as TileBrushSelection;
-              dropped = { ...parsed, kind: 'tile' };
+              const parsed = JSON.parse(rawFace) as TileBrushSelection;
+              droppedTile = { ...parsed, kind: 'tile' };
             } catch {
-              dropped = draggingTileBrush;
+              // Keep draggingBrush fallback
             }
           }
-          if (dropped) {
-            onDropFaceAt(coord, dropped);
+          if (droppedTile) {
+            onDropFaceAt(coord, droppedTile);
           }
-          setHoveredCoord(null);
         }}
         onClick={(e) => {
           if (suppressNextClickRef.current) {
@@ -441,10 +525,18 @@ export function CanvasViewport({
             return;
           }
           if (spacePressed || e.button !== 0) return;
-          const coord = pointerToAxial(e.clientX, e.clientY);
+          const world = pointerToWorld(e.clientX, e.clientY);
+          const coord = world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
           if (activeBrush) {
             if (activeBrush.kind === 'tile' && coord) {
               onPlaceAt(coord);
+            } else if (
+              activeBrush.kind === 'overlay' &&
+              coord &&
+              world &&
+              findPlacementAt(placements, coord)
+            ) {
+              onPlaceOverlayAt(coord, world.x, world.y);
             }
             return;
           }
@@ -456,7 +548,40 @@ export function CanvasViewport({
         }}
       />
 
-      {activeTarget && (
+      {activeOverlayBrush && overlayBrushLabel && (
+        <div className="pointer-events-none absolute inset-x-2 bottom-4 flex justify-center">
+          <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 rounded-xl border border-[#2e2a26] bg-[#161412]/95 px-2.5 py-1.5 text-xs shadow-xl backdrop-blur">
+            <span className="mr-0.5 whitespace-nowrap font-mono font-semibold text-sky-300">
+              {overlayBrushLabel}
+            </span>
+            <span className="mr-1 whitespace-nowrap rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-300">
+              {Math.round(activeOverlayBrush.rotationDeg)}°
+            </span>
+
+            <button
+              type="button"
+              onClick={() => onRotateAction(-1)}
+              title="Rotate Overlay brush 60° counter-clockwise (Shift+R)"
+              className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-stone-200 transition hover:bg-stone-800"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span>-60°</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onRotateAction(1)}
+              title="Rotate Overlay brush 60° clockwise (R)"
+              className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-stone-200 transition hover:bg-stone-800"
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+              <span>+60°</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {activeTarget && !activeOverlayBrush && (
         <div className="pointer-events-none absolute inset-x-2 bottom-4 flex justify-center">
           <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 rounded-xl border border-[#2e2a26] bg-[#161412]/95 px-2.5 py-1.5 text-xs shadow-xl backdrop-blur">
             <span className="mr-0.5 whitespace-nowrap font-mono font-semibold text-amber-300">
@@ -516,7 +641,7 @@ export function CanvasViewport({
         </div>
       )}
 
-      {placements.length === 0 && !activeTarget && (
+      {placements.length === 0 && !activeTarget && !activeOverlayBrush && (
         <div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center">
           <div className="rounded-full border border-[#2e2a26] bg-[#161412]/90 px-4 py-1.5 text-xs text-stone-300 shadow-lg">
             Click or drag any Tile Face from the Tile Palette onto the hex grid

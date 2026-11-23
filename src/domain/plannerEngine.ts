@@ -1,4 +1,5 @@
 import { axialKey, clampOffsetToUnitHex, normalizeRotationDeg } from './hexGeometry';
+import { reprojectOverlayToHost, worldToClampedOverlayLocal } from './overlayGeometry';
 import {
   DEFAULT_OVERLAY_PACK_COPIES,
   DEFAULT_TILESET_COPIES,
@@ -70,10 +71,97 @@ export function findPlacementAt(
 }
 
 export function placeTile(placements: readonly Placement[], nextPlacement: Placement): Placement[] {
-  const remaining = placements.filter(
-    (p) => !(p.q === nextPlacement.q && p.r === nextPlacement.r),
+  const existing = findPlacementAt(placements, nextPlacement);
+  if (!existing) {
+    return [...placements, { ...nextPlacement }];
+  }
+
+  const merged: Placement = { ...nextPlacement };
+  if (merged.covered === undefined && existing.covered) {
+    merged.covered = true;
+  }
+  if (merged.overlays === undefined && existing.overlays && existing.overlays.length > 0) {
+    merged.overlays = existing.overlays.map((ov) => {
+      const local = reprojectOverlayToHost(existing, ov, merged);
+      return {
+        ...ov,
+        offsetX: local.offsetX,
+        offsetY: local.offsetY,
+        rotationDeg: local.rotationDeg,
+      };
+    });
+  }
+
+  return placements.map((p) =>
+    p.q === nextPlacement.q && p.r === nextPlacement.r ? merged : p,
   );
-  return [...remaining, { ...nextPlacement }];
+}
+
+let overlayIdSeq = 0;
+
+function nextOverlayPlacementId(placements: readonly Placement[]): string {
+  const used = new Set<string>();
+  for (const p of placements) {
+    for (const ov of p.overlays ?? []) {
+      used.add(ov.id);
+    }
+  }
+  let candidate = '';
+  do {
+    overlayIdSeq += 1;
+    const suffix =
+      typeof globalThis.crypto?.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID().slice(0, 8)
+        : `${Date.now().toString(36)}-${overlayIdSeq}`;
+    candidate = `ov-${suffix}-${overlayIdSeq}`;
+  } while (used.has(candidate));
+  return candidate;
+}
+
+export interface AttachOverlayResult {
+  placements: Placement[];
+  createdOverlay: OverlayPlacement | null;
+}
+
+/** Attach an Overlay Placement onto an occupied host Placement at the clamped world pointer position. */
+export function attachOverlayAtWorld(
+  placements: readonly Placement[],
+  hostCoord: AxialCoord,
+  overlay: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'> & { rotationDeg?: number },
+  worldX: number,
+  worldY: number,
+  options?: { id?: string; radius?: number },
+): AttachOverlayResult {
+  const host = findPlacementAt(placements, hostCoord);
+  if (!host) {
+    return { placements: [...placements], createdOverlay: null };
+  }
+
+  const local = worldToClampedOverlayLocal(
+    host,
+    worldX,
+    worldY,
+    overlay.rotationDeg ?? 0,
+    options?.radius,
+  );
+  const id = options?.id?.trim() ? options.id.trim() : nextOverlayPlacementId(placements);
+  const createdOverlay: OverlayPlacement = {
+    id,
+    overlayPackId: overlay.overlayPackId,
+    overlayId: overlay.overlayId,
+    offsetX: local.offsetX,
+    offsetY: local.offsetY,
+    rotationDeg: local.rotationDeg,
+  };
+
+  return {
+    createdOverlay,
+    placements: placements.map((p) =>
+      p.q === hostCoord.q && p.r === hostCoord.r
+        ? { ...p, overlays: [...(p.overlays ?? []), createdOverlay] }
+        : p,
+    ),
+  };
 }
 
 export function rotateStep(rotation: RotationStep, delta: 1 | -1): RotationStep {
