@@ -5,6 +5,7 @@ import {
   Eraser,
   Eye,
   EyeOff,
+  FolderInput,
   Grid3x3,
   Hexagon,
   ImageDown,
@@ -63,6 +64,8 @@ interface ToolbarProps {
   onRedo: () => void;
   onRequestClearMap: () => void;
   onOpenCollection: () => void;
+  onOpenBundleManager?: () => void;
+  bundleLoaded?: boolean;
   onOpenPngExport: () => void;
   viewMode: MapViewMode;
   onChangeViewMode: (mode: MapViewMode) => void;
@@ -109,6 +112,8 @@ export function Toolbar({
   onRedo,
   onRequestClearMap,
   onOpenCollection,
+  onOpenBundleManager,
+  bundleLoaded = true,
   onOpenPngExport,
   viewMode,
   onChangeViewMode,
@@ -412,6 +417,22 @@ export function Toolbar({
           <Package className="h-3.5 w-3.5 text-amber-400" />
           <span>Collection</span>
         </button>
+
+        {onOpenBundleManager && (
+          <button
+            type="button"
+            onClick={onOpenBundleManager}
+            title="Load or manage Realm Brew bundle images in browser storage"
+            className={`flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
+              !bundleLoaded
+                ? 'border-amber-500/50 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25'
+                : 'border-[#2e2a26] bg-[#1c1917] text-stone-300 hover:bg-stone-800 hover:text-stone-100'
+            }`}
+          >
+            <FolderInput className="h-3.5 w-3.5 text-amber-400" />
+            <span>Bundle</span>
+          </button>
+        )}
 
         <button
           type="button"

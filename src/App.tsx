@@ -7,12 +7,17 @@ import {
   fetchMap,
   fetchMaps,
   fetchTilesets,
+  initStorageMode,
+  listStoredPacks,
   saveCollection,
   saveMap,
+  type StorageMode,
+  type StoredPackSummary,
 } from './api/client';
 import { TileImageCache } from './canvas/imageCache';
 import { resolveOverlayFitAssetState } from './canvas/mapRenderer';
 import { exportMapAsPng } from './canvas/pngExporter';
+import { BundleImportDialog } from './components/BundleImportDialog';
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog, type CollectionPackKind } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -139,6 +144,9 @@ export function App() {
   );
   const [camera, setCamera] = useState<Camera>(DEFAULT_CAMERA);
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
+  const [storageMode, setStorageMode] = useState<StorageMode>('server');
+  const [bundleDialogOpen, setBundleDialogOpen] = useState(false);
+  const [storedPacks, setStoredPacks] = useState<StoredPackSummary[]>([]);
   const [collectionDialogOpen, setCollectionDialogOpen] = useState(false);
   const [pngExportOpen, setPngExportOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
@@ -173,6 +181,7 @@ export function App() {
   const panAnimFrameRef = useRef<number | null>(null);
   const paletteScrollPositionsRef = useRef({ tiles: 0, overlays: 0 });
   const collectionSaveSeqRef = useRef(0);
+  const didAutoOpenBundleRef = useRef(false);
   const imageCache = useMemo(() => new TileImageCache(), []);
 
   const saveTimerRef = useRef<number | null>(null);
@@ -293,8 +302,16 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchTilesets(), fetchCollection(), fetchMaps()])
-      .then(async ([tilesetList, col, mapList]) => {
+    initStorageMode()
+      .then(async (mode) => {
+        if (cancelled) return;
+        setStorageMode(mode);
+        const [tilesetList, col, mapList, packSummaries] = await Promise.all([
+          fetchTilesets(),
+          fetchCollection(),
+          fetchMaps(),
+          mode === 'browser' ? listStoredPacks() : Promise.resolve([]),
+        ]);
         if (cancelled) return;
         const nextOverlayPacks = new Map<string, OverlayPack>();
         for (const pack of tilesetList.overlayPacks) {
@@ -303,8 +320,14 @@ export function App() {
         overlayPacksByIdRef.current = nextOverlayPacks;
         setTilesets(tilesetList.tilesets);
         setOverlayPacks(tilesetList.overlayPacks);
+        setStoredPacks(packSummaries);
         setBundleError(tilesetList.bundleConfigured ? undefined : tilesetList.error);
         setCollection(col);
+
+        if (mode === 'browser' && !tilesetList.bundleConfigured && !didAutoOpenBundleRef.current) {
+          didAutoOpenBundleRef.current = true;
+          setBundleDialogOpen(true);
+        }
 
         if (mapList.length === 0) {
           const initial = await createMap('Untitled Map', []);
@@ -333,6 +356,57 @@ export function App() {
       }
     };
   }, [loadMapIntoEditor]);
+
+  const handleBundleUpdated = useCallback(async () => {
+    const [tilesetList, packSummaries, col] = await Promise.all([
+      fetchTilesets(),
+      listStoredPacks(),
+      fetchCollection(),
+    ]);
+    const nextTilesetsById = new Map<string, Tileset>();
+    for (const ts of tilesetList.tilesets) {
+      nextTilesetsById.set(ts.id, ts);
+    }
+    const nextOverlayPacks = new Map<string, OverlayPack>();
+    for (const pack of tilesetList.overlayPacks) {
+      nextOverlayPacks.set(pack.id, pack);
+    }
+
+    imageCache.clear();
+    overlayPacksByIdRef.current = nextOverlayPacks;
+    setTilesets(tilesetList.tilesets);
+    setOverlayPacks(tilesetList.overlayPacks);
+    setStoredPacks(packSummaries);
+    setCollection(col);
+    setBundleError(tilesetList.bundleConfigured ? undefined : tilesetList.error);
+
+    setSelectedTilesetId((cur) => (cur !== 'all' && !nextTilesetsById.has(cur) ? 'all' : cur));
+    setSelectedOverlayPackId((cur) =>
+      cur !== 'all' && !nextOverlayPacks.has(cur) ? 'all' : cur,
+    );
+
+    setActiveBrush((current) => {
+      if (!current) return null;
+      if (current.kind === 'tile') {
+        const ts = nextTilesetsById.get(current.tilesetId);
+        const tile = ts?.tiles.find((t) => t.tileId === current.tileId);
+        if (!tile) return null;
+        const hasFace =
+          tile.faceA.faceNumber === current.faceNumber ||
+          tile.faceB.faceNumber === current.faceNumber;
+        return hasFace ? current : null;
+      }
+      const pack = nextOverlayPacks.get(current.overlayPackId);
+      const overlay = pack?.overlays.find((o) => o.overlayId === current.overlayId);
+      if (!pack || !overlay) return null;
+      return {
+        ...current,
+        label: overlay.label,
+        shortCode: pack.shortCode,
+        url: overlay.url,
+      };
+    });
+  }, [imageCache]);
 
   const collectionUsage = useMemo(
     () => computeCollectionUsage(placements, tilesets, collection, overlayPacks),
@@ -1232,6 +1306,10 @@ export function App() {
         onRedo={handleRedo}
         onRequestClearMap={() => setClearConfirmOpen(true)}
         onOpenCollection={() => setCollectionDialogOpen(true)}
+        onOpenBundleManager={
+          storageMode === 'browser' ? () => setBundleDialogOpen(true) : undefined
+        }
+        bundleLoaded={tilesets.length > 0 || overlayPacks.length > 0}
         onOpenPngExport={() => {
           if (viewModeRef.current === 'gm') {
             setPngExportOpen(true);
@@ -1290,6 +1368,9 @@ export function App() {
             onToggleCollapse={() => setPaletteCollapsed((c) => !c)}
             scrollPositionsRef={paletteScrollPositionsRef}
             bundleError={bundleError}
+            onOpenBundleManager={
+              storageMode === 'browser' ? () => setBundleDialogOpen(true) : undefined
+            }
           />
         )}
 
@@ -1385,6 +1466,15 @@ export function App() {
         onChangeCopies={handleChangeCopies}
       />
 
+      {storageMode === 'browser' && (
+        <BundleImportDialog
+          open={bundleDialogOpen}
+          onClose={() => setBundleDialogOpen(false)}
+          storedPacks={storedPacks}
+          onBundleUpdated={handleBundleUpdated}
+        />
+      )}
+
       <PngExportDialog
         open={viewMode === 'gm' && pngExportOpen}
         onClose={() => setPngExportOpen(false)}
@@ -1419,7 +1509,11 @@ export function App() {
       <ConfirmDialog
         open={deleteMapConfirmOpen}
         title={`Delete "${activeMap?.name ?? 'Map'}"?`}
-        description="This permanently deletes this saved Map from your local .data/maps directory."
+        description={
+          storageMode === 'browser'
+            ? "This permanently deletes this saved Map from this browser's local storage."
+            : 'This permanently deletes this saved Map from your local .data/maps directory.'
+        }
         confirmLabel="Delete Map"
         onConfirm={() => void handleConfirmDeleteMap()}
         onCancel={() => setDeleteMapConfirmOpen(false)}

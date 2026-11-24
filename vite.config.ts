@@ -9,6 +9,7 @@ export default defineConfig(({ mode }) => {
   const bundleDir = env.REALM_BREW_BUNDLE_DIR || process.env.REALM_BREW_BUNDLE_DIR;
 
   return {
+    base: './',
     plugins: [
       react(),
       tailwindcss(),

@@ -1,4 +1,13 @@
-import { AlertTriangle, ChevronLeft, ChevronRight, Layers, Search, Sparkles, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  FolderInput,
+  Layers,
+  Search,
+  Sparkles,
+  X,
+} from 'lucide-react';
 import { useLayoutEffect, useMemo, useRef, type MutableRefObject } from 'react';
 import {
   buildOverlayPaletteSections,
@@ -48,6 +57,7 @@ interface TilePaletteProps {
   onToggleCollapse: () => void;
   scrollPositionsRef?: MutableRefObject<{ tiles: number; overlays: number }>;
   bundleError?: string;
+  onOpenBundleManager?: () => void;
 }
 
 function RemainingBadge({ remaining, compact = false }: { remaining: number; compact?: boolean }) {
@@ -271,6 +281,26 @@ function OverlayCardButton({
   );
 }
 
+function BundleOnboardingCard({ onOpenBundleManager }: { onOpenBundleManager: () => void }) {
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-3.5 text-xs text-stone-200">
+      <p className="font-semibold text-amber-200">Load your Realm Brew bundle</p>
+      <p className="mt-1.5 leading-relaxed text-stone-300">
+        Realm Brew artwork stays local in your browser&apos;s IndexedDB storage and is never uploaded
+        to a server.
+      </p>
+      <button
+        type="button"
+        onClick={onOpenBundleManager}
+        className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-xs font-semibold text-stone-950 transition hover:bg-amber-400"
+      >
+        <FolderInput className="h-3.5 w-3.5" />
+        <span>Load Bundle…</span>
+      </button>
+    </div>
+  );
+}
+
 export function TilePalette({
   activeTab,
   onTabChange,
@@ -296,6 +326,7 @@ export function TilePalette({
   onToggleCollapse,
   scrollPositionsRef,
   bundleError,
+  onOpenBundleManager,
 }: TilePaletteProps) {
   const tilesScrollRef = useRef<HTMLDivElement>(null);
   const overlaysScrollRef = useRef<HTMLDivElement>(null);
@@ -560,14 +591,18 @@ export function TilePalette({
         }}
         className={activeTab === 'tiles' ? 'rb-scroll flex-1 overflow-y-auto px-2.5 py-2.5' : 'hidden'}
       >
-        {bundleError && (
+        {!onOpenBundleManager && bundleError && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-xs text-amber-200">
             <p className="font-semibold">Bundle directory unavailable</p>
             <p className="mt-1 text-amber-200/80">{bundleError}</p>
           </div>
         )}
 
-        {!bundleError && visibleTileSections.length === 0 && (
+        {onOpenBundleManager && !inStockOnly && tilesets.length === 0 && (
+          <BundleOnboardingCard onOpenBundleManager={onOpenBundleManager} />
+        )}
+
+        {(onOpenBundleManager ? (tilesets.length > 0 || inStockOnly) && visibleTileSections.length === 0 : !bundleError && visibleTileSections.length === 0) && (
           <div className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-4 text-center text-xs text-stone-400">
             {inStockOnly ? 'No available Tiles remaining in this filter.' : 'No Tilesets found.'}
           </div>
@@ -670,14 +705,24 @@ export function TilePalette({
         }}
         className={activeTab === 'overlays' ? 'rb-scroll flex-1 overflow-y-auto px-2.5 py-2.5' : 'hidden'}
       >
-        {bundleError && (
+        {!onOpenBundleManager && bundleError && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-950/30 p-3 text-xs text-amber-200">
             <p className="font-semibold">Bundle directory unavailable</p>
             <p className="mt-1 text-amber-200/80">{bundleError}</p>
           </div>
         )}
 
-        {!bundleError && visibleOverlaySections.length === 0 && (
+        {onOpenBundleManager &&
+          !inStockOnly &&
+          overlaySearchQuery.trim().length === 0 &&
+          overlayPacks.length === 0 && (
+            <BundleOnboardingCard onOpenBundleManager={onOpenBundleManager} />
+          )}
+
+        {(onOpenBundleManager
+          ? (overlayPacks.length > 0 || inStockOnly || overlaySearchQuery.trim().length > 0) &&
+            visibleOverlaySections.length === 0
+          : !bundleError && visibleOverlaySections.length === 0) && (
           <div className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-4 text-center text-xs text-stone-400">
             <p>
               {overlaySearchQuery.trim().length > 0
