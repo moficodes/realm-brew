@@ -224,48 +224,6 @@ export function App() {
     [persistNow],
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([fetchTilesets(), fetchCollection(), fetchMaps()])
-      .then(async ([tilesetList, col, mapList]) => {
-        if (cancelled) return;
-        setTilesets(tilesetList.tilesets);
-        setOverlayPacks(tilesetList.overlayPacks);
-        setBundleError(tilesetList.bundleConfigured ? undefined : tilesetList.error);
-        setCollection(col);
-
-        if (mapList.length === 0) {
-          const initial = await createMap('Untitled Map', []);
-          if (cancelled) return;
-          setMaps([toMapSummary(initial)]);
-          setActiveMap(initial);
-          setHistory(createHistory(initial.placements));
-          setSaveStatus('saved');
-        } else {
-          setMaps(mapList);
-          const loaded = await fetchMap(mapList[0].id);
-          if (cancelled) return;
-          setActiveMap(loaded);
-          setHistory(createHistory(loaded.placements));
-          setSaveStatus('saved');
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setAppBannerError(err instanceof Error ? err.message : 'Unable to load workspace');
-      });
-
-    return () => {
-      cancelled = true;
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-      }
-      if (panAnimFrameRef.current !== null) {
-        window.cancelAnimationFrame(panAnimFrameRef.current);
-      }
-    };
-  }, []);
-
   const tilesetsById = useMemo(() => {
     const map = new Map<string, Tileset>();
     for (const ts of tilesets) {
@@ -283,65 +241,6 @@ export function App() {
   }, [overlayPacks]);
   const overlayPacksByIdRef = useRef(overlayPacksById);
   overlayPacksByIdRef.current = overlayPacksById;
-
-  const collectionUsage = useMemo(
-    () => computeCollectionUsage(placements, tilesets, collection, overlayPacks),
-    [placements, tilesets, collection, overlayPacks],
-  );
-
-  const overlayCount = useMemo(() => countMapOverlays(placements), [placements]);
-  const coveredCount = useMemo(() => countCoveredPlacements(placements), [placements]);
-
-  const { overBudgetTilesetIds, overBudgetOverlayPackIds } = useMemo(() => {
-    const tilesetIds = new Set<string>();
-    for (const avail of collectionUsage.byTileKey.values()) {
-      if (avail.isOverBudget) {
-        tilesetIds.add(avail.tilesetId);
-      }
-    }
-    const overlayPackIds = new Set<string>();
-    for (const avail of collectionUsage.byOverlayKey.values()) {
-      if (avail.isOverBudget) {
-        overlayPackIds.add(avail.overlayPackId);
-      }
-    }
-    return { overBudgetTilesetIds: tilesetIds, overBudgetOverlayPackIds: overlayPackIds };
-  }, [collectionUsage]);
-
-  const pullList = useMemo(
-    () => computePullList(placements, tilesets, collection, overlayPacks),
-    [placements, tilesets, collection, overlayPacks],
-  );
-
-  const selectedHost = useMemo(
-    () => (selectedCoord ? findPlacementAt(placements, selectedCoord) : undefined),
-    [placements, selectedCoord],
-  );
-
-  const commitPlacements = useCallback(
-    (updater: (current: Placement[]) => Placement[]) => {
-      const currentPlacements = historyRef.current.present;
-      const nextPlacements = updater(currentPlacements);
-      if (nextPlacements === currentPlacements) {
-        return;
-      }
-      const committed = commitWithFence(
-        historyRef.current,
-        playerViewFenceRef.current,
-        nextPlacements,
-      );
-      historyRef.current = committed.history;
-      setHistory(committed.history);
-      playerViewFenceRef.current = committed.fence;
-      setPlayerViewFence(committed.fence);
-
-      const currentMap = activeMapRef.current;
-      if (currentMap) {
-        scheduleAutoSave(currentMap.id, currentMap.name, nextPlacements);
-      }
-    },
-    [scheduleAutoSave],
-  );
 
   const cancelSmoothPan = useCallback(() => {
     if (panAnimFrameRef.current !== null) {
@@ -390,6 +289,115 @@ export function App() {
       );
     },
     [cancelSmoothPan, imageCache],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([fetchTilesets(), fetchCollection(), fetchMaps()])
+      .then(async ([tilesetList, col, mapList]) => {
+        if (cancelled) return;
+        const nextOverlayPacks = new Map<string, OverlayPack>();
+        for (const pack of tilesetList.overlayPacks) {
+          nextOverlayPacks.set(pack.id, pack);
+        }
+        overlayPacksByIdRef.current = nextOverlayPacks;
+        setTilesets(tilesetList.tilesets);
+        setOverlayPacks(tilesetList.overlayPacks);
+        setBundleError(tilesetList.bundleConfigured ? undefined : tilesetList.error);
+        setCollection(col);
+
+        if (mapList.length === 0) {
+          const initial = await createMap('Untitled Map', []);
+          if (cancelled) return;
+          setMaps([toMapSummary(initial)]);
+          loadMapIntoEditor(initial);
+        } else {
+          setMaps(mapList);
+          const loaded = await fetchMap(mapList[0].id);
+          if (cancelled) return;
+          loadMapIntoEditor(loaded);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setAppBannerError(err instanceof Error ? err.message : 'Unable to load workspace');
+      });
+
+    return () => {
+      cancelled = true;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      if (panAnimFrameRef.current !== null) {
+        window.cancelAnimationFrame(panAnimFrameRef.current);
+      }
+    };
+  }, [loadMapIntoEditor]);
+
+  const collectionUsage = useMemo(
+    () => computeCollectionUsage(placements, tilesets, collection, overlayPacks),
+    [placements, tilesets, collection, overlayPacks],
+  );
+
+  const overlayCount = useMemo(() => countMapOverlays(placements), [placements]);
+  const coveredCount = useMemo(() => countCoveredPlacements(placements), [placements]);
+
+  const { overBudgetTilesetIds, overBudgetOverlayPackIds } = useMemo(() => {
+    const tilesetIds = new Set<string>();
+    for (const avail of collectionUsage.byTileKey.values()) {
+      if (avail.isOverBudget) {
+        tilesetIds.add(avail.tilesetId);
+      }
+    }
+    const overlayPackIds = new Set<string>();
+    for (const avail of collectionUsage.byOverlayKey.values()) {
+      if (avail.isOverBudget) {
+        overlayPackIds.add(avail.overlayPackId);
+      }
+    }
+    return { overBudgetTilesetIds: tilesetIds, overBudgetOverlayPackIds: overlayPackIds };
+  }, [collectionUsage]);
+
+  const pullList = useMemo(
+    () => computePullList(placements, tilesets, collection, overlayPacks),
+    [placements, tilesets, collection, overlayPacks],
+  );
+
+  const selectedHost = useMemo(
+    () => (selectedCoord ? findPlacementAt(placements, selectedCoord) : undefined),
+    [placements, selectedCoord],
+  );
+
+  const applyCommittedPlacements = useCallback(
+    (nextPlacements: Placement[]) => {
+      const committed = commitWithFence(
+        historyRef.current,
+        playerViewFenceRef.current,
+        nextPlacements,
+      );
+      historyRef.current = committed.history;
+      setHistory(committed.history);
+      playerViewFenceRef.current = committed.fence;
+      setPlayerViewFence(committed.fence);
+
+      const currentMap = activeMapRef.current;
+      if (currentMap) {
+        scheduleAutoSave(currentMap.id, currentMap.name, nextPlacements);
+      }
+    },
+    [scheduleAutoSave],
+  );
+
+  const commitPlacements = useCallback(
+    (updater: (current: Placement[]) => Placement[]) => {
+      const currentPlacements = historyRef.current.present;
+      const nextPlacements = updater(currentPlacements);
+      if (nextPlacements === currentPlacements) {
+        return;
+      }
+      applyCommittedPlacements(nextPlacements);
+    },
+    [applyCommittedPlacements],
   );
 
   const handleSelectMap = useCallback(
@@ -553,16 +561,7 @@ export function App() {
       );
       if (!createdOverlay) return;
 
-      const committed = commitWithFence(historyRef.current, playerViewFenceRef.current, next);
-      historyRef.current = committed.history;
-      setHistory(committed.history);
-      playerViewFenceRef.current = committed.fence;
-      setPlayerViewFence(committed.fence);
-
-      const currentMap = activeMapRef.current;
-      if (currentMap) {
-        scheduleAutoSave(currentMap.id, currentMap.name, next);
-      }
+      applyCommittedPlacements(next);
 
       setSelectedCoord(coord);
       setFocusedOverlayId(createdOverlay.id);
@@ -570,7 +569,7 @@ export function App() {
         setActiveBrush(null);
       }
     },
-    [activeBrush, scheduleAutoSave],
+    [activeBrush, applyCommittedPlacements],
   );
 
   const handleSelectHostOnly = useCallback((coord: AxialCoord | null) => {
@@ -627,24 +626,12 @@ export function App() {
         worldY,
       );
       if (res.changed) {
-        const committed = commitWithFence(
-          historyRef.current,
-          playerViewFenceRef.current,
-          res.placements,
-        );
-        historyRef.current = committed.history;
-        setHistory(committed.history);
-        playerViewFenceRef.current = committed.fence;
-        setPlayerViewFence(committed.fence);
-        const currentMap = activeMapRef.current;
-        if (currentMap) {
-          scheduleAutoSave(currentMap.id, currentMap.name, res.placements);
-        }
+        applyCommittedPlacements(res.placements);
       }
       setSelectedCoord(targetHost);
       setFocusedOverlayId(overlayId);
     },
-    [scheduleAutoSave],
+    [applyCommittedPlacements],
   );
 
   const handleSetOverlayWorldRotation = useCallback(
@@ -1191,6 +1178,7 @@ export function App() {
   useEffect(() => {
     if (rightDrawerCollapsed || rightDrawerTab !== 'inspector') {
       setHoveredInspectorOverlayId(null);
+      setInspectorRotationPreview(null);
     }
     if (rightDrawerCollapsed || rightDrawerTab !== 'pull-list') {
       setPullListHighlight(null);
@@ -1365,12 +1353,10 @@ export function App() {
             onExpandToInspector={handleExpandInspector}
             mapName={activeMap?.name ?? 'Untitled Map'}
             pullList={pullList}
-            placements={placements}
             selectedHost={selectedHost}
             focusedOverlayId={focusedOverlayId}
             tilesetsById={tilesetsById}
             overlayPacksById={overlayPacksById}
-            onSelectHostCoord={handleSelectHostOnly}
             onFocusOverlayId={setFocusedOverlayId}
             onHoverOverlayId={setHoveredInspectorOverlayId}
             onHoverPullListHighlight={setPullListHighlight}

@@ -16,12 +16,10 @@ interface RightDrawerProps {
   onExpandToInspector: () => void;
   mapName: string;
   pullList: PullListSummary;
-  placements: readonly Placement[];
   selectedHost: Placement | undefined;
   focusedOverlayId: string | null;
   tilesetsById: ReadonlyMap<string, Tileset>;
   overlayPacksById: ReadonlyMap<string, OverlayPack>;
-  onSelectHostCoord: (coord: AxialCoord) => void;
   onFocusOverlayId: (overlayId: string | null) => void;
   onHoverOverlayId: (overlayId: string | null) => void;
   onHoverPullListHighlight: (highlight: PullListHighlight | null) => void;
@@ -51,12 +49,10 @@ export function RightDrawer({
   onExpandToInspector,
   mapName,
   pullList,
-  placements,
   selectedHost,
   focusedOverlayId,
   tilesetsById,
   overlayPacksById,
-  onSelectHostCoord,
   onFocusOverlayId,
   onHoverOverlayId,
   onHoverPullListHighlight,
@@ -171,12 +167,10 @@ export function RightDrawer({
 
       {activeTab === 'inspector' ? (
         <HostInspectorPanel
-          placements={placements}
           selectedHost={selectedHost}
           focusedOverlayId={focusedOverlayId}
           tilesetsById={tilesetsById}
           overlayPacksById={overlayPacksById}
-          onSelectHostCoord={onSelectHostCoord}
           onFocusOverlayId={onFocusOverlayId}
           onHoverOverlayId={onHoverOverlayId}
           onRotateHost={onRotateHost}

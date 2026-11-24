@@ -11,7 +11,9 @@ import {
   computeFitCamera,
   computePanToFocusCamera,
   hexCorners,
+  isPointInFlatTopHex as isPointInHexFromCore,
   normalizeRotationDeg,
+  normalizeZero,
   screenToAxial,
   screenToWorld,
   worldToAxial,
@@ -49,6 +51,7 @@ import {
   type CalloutBox,
 } from '../src/domain/calloutLayout';
 import { formatExportPngFilename } from '../src/canvas/pngExporter';
+import { formatDisplayDegrees } from '../src/utils/browserHelpers';
 import type { OverlayPack, Placement, Tileset } from '../src/domain/types';
 
 describe('Flat-top hex geometry (Seam 2)', () => {
@@ -398,7 +401,7 @@ describe('Overlay geometry & host-local transforms (Seam 3)', () => {
             // Unresolved/missing overlay on host 1 -> 72x44 rotated OBB at 45°, NO alpha check
             id: 'ov-missing',
             overlayPackId: 'missing-pack',
-            overlayId: 'missing-piece',
+            overlayId: 'missing-overlay',
             offsetX: 0,
             offsetY: 0,
             rotationDeg: 45,
@@ -417,8 +420,8 @@ describe('Overlay geometry & host-local transforms (Seam 3)', () => {
         return null; // missing
       },
       isOpaqueAt: (ov: { overlayId: string }, u: number, v: number) => {
-        // Missing pieces must never rely on isOpaqueAt; return false here to verify it's ignored for missing
-        if (ov.overlayId === 'missing-piece') return false;
+        // Missing Overlays must never rely on isOpaqueAt; return false here to verify it's ignored for missing
+        if (ov.overlayId === 'missing-overlay') return false;
         // Gem is opaque only in center 50% (u,v in [0.25, 0.75]), bridge has transparent corners
         if (ov.overlayId === 'bridge') {
           const isCorner = (u < 0.2 || u > 0.8) && (v < 0.2 || v > 0.8);
@@ -432,7 +435,7 @@ describe('Overlay geometry & host-local transforms (Seam 3)', () => {
     const centerHits = hitTestOverlaysAtWorld(placements, 0, 0, lookupWithTransparentCorner);
     expect(centerHits.map((h) => h.overlay.id)).toEqual(['ov-tiny-gem', 'ov-bottom-bridge']);
 
-    // Tiny piece padding: at (12, 0), outside gem's raw 16x12 (half-w=8) but inside padded 32x32 (half-w=16)
+    // Tiny Overlay padding: at (12, 0), outside gem's raw 16x12 (half-w=8) but inside padded 32x32 (half-w=16)
     const paddedGemHits = hitTestOverlaysAtWorld(placements, 12, 0, lookupWithTransparentCorner);
     expect(paddedGemHits[0]?.overlay.id).toBe('ov-tiny-gem');
 
@@ -506,7 +509,7 @@ describe('Overlay geometry & host-local transforms (Seam 3)', () => {
       ),
     ).toBe(false);
 
-    // Same 30x30 piece anchored right on the edge (offsetX = 0.9 -> x=90, corner at x=105 > 100) overhangs
+    // Same 30x30 Overlay anchored right on the edge (offsetX = 0.9 -> x=90, corner at x=105 > 100) overhangs
     expect(
       doesOverlayOverhangHostHex(
         host,
@@ -829,7 +832,7 @@ describe('World-space Assembly Callouts & collision solver (Seam 3)', () => {
             // Missing asset on uncovered host (-300, -sqrt3*100) at left rim (offsetX=-1 -> x=-400, 72x44 -> minX=-436)
             id: 'ov-missing-rim',
             overlayPackId: 'lost-pack',
-            overlayId: 'missing-prop',
+            overlayId: 'missing-overlay',
             offsetX: -1,
             offsetY: 0,
             rotationDeg: 0,
@@ -966,7 +969,7 @@ describe('PNG export v2 bounds with Overlays, Fog of War, and callouts (Seam 3)'
           {
             id: 'ov-missing-rim',
             overlayPackId: 'missing-pack',
-            overlayId: 'missing-prop',
+            overlayId: 'missing-overlay',
             offsetX: 0.9,
             offsetY: 0,
             rotationDeg: 90,
@@ -1203,5 +1206,24 @@ describe('PNG export v2 bounds with Overlays, Fog of War, and callouts (Seam 3)'
     expect(formatExportPngFilename('Goblin Cave!', 'gm', 0)).toBe('goblin-cave.png');
     expect(formatExportPngFilename('Goblin Cave!', 'player', 0)).toBe('goblin-cave.png');
     expect(formatExportPngFilename('!!!', 'player', 1)).toBe('realm-brew-map-player.png');
+  });
+
+  it('exports normalizeZero and isPointInFlatTopHex from hexGeometry and matches overlayGeometry', () => {
+    expect(Object.is(normalizeZero(-0), 0)).toBe(true);
+    expect(normalizeZero(-4.5)).toBe(-4.5);
+    expect(isPointInHexFromCore(0, 0, { q: 0, r: 0 })).toBe(true);
+    expect(isPointInHexFromCore(HEX_RADIUS, 0, { q: 0, r: 0 })).toBe(true);
+    expect(isPointInHexFromCore(HEX_RADIUS + 1, 0, { q: 0, r: 0 })).toBe(false);
+    expect(isPointInFlatTopHex(0, HEX_HEIGHT / 2, { q: 0, r: 0 })).toBe(true);
+  });
+
+  it('formats display degrees cleanly into [0, 360) without -0', () => {
+    expect(Object.is(formatDisplayDegrees(0), 0)).toBe(true);
+    expect(Object.is(formatDisplayDegrees(-0.4), 0)).toBe(true);
+    expect(Object.is(formatDisplayDegrees(359.6), 0)).toBe(true);
+    expect(Object.is(formatDisplayDegrees(-360), 0)).toBe(true);
+    expect(formatDisplayDegrees(-15)).toBe(345);
+    expect(formatDisplayDegrees(375)).toBe(15);
+    expect(formatDisplayDegrees(14.6)).toBe(15);
   });
 });

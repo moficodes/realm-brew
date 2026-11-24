@@ -7,7 +7,9 @@ import {
   clampOffsetToUnitHex,
   clampZoom,
   computePlacementsWorldBounds,
+  isPointInFlatTopHex,
   normalizeRotationDeg,
+  normalizeZero,
   rotationToRadians,
   type BoundingBox,
   type Camera,
@@ -39,9 +41,7 @@ export interface WorldDimensions {
   height: number;
 }
 
-function normalizeZero(n: number): number {
-  return n === 0 ? 0 : n;
-}
+export { isPointInFlatTopHex };
 
 /** Return 1:1 physical world dimensions for an Overlay image, or the 72x44 fallback box. */
 export function getOverlayWorldSize(
@@ -300,25 +300,6 @@ export function isPointOnDialKnob(
 ): boolean {
   const hitRadius = Math.max(11 / Math.max(0.1, zoom), 9);
   return Math.hypot(worldX - dial.knobX, worldY - dial.knobY) <= hitRadius;
-}
-
-const HEX_SQRT3 = Math.sqrt(3);
-const HEX_UNIT_APOTHEM = HEX_SQRT3 / 2;
-
-/** Return true if a world-space point lies inside or on the boundary of a flat-top hex. */
-export function isPointInFlatTopHex(
-  worldX: number,
-  worldY: number,
-  hostCoord: AxialCoord,
-  radius = HEX_RADIUS,
-  epsilon = 1e-6,
-): boolean {
-  const center = axialToWorld(hostCoord.q, hostCoord.r, radius);
-  const dx = Math.abs(worldX - center.x) / radius;
-  const dy = Math.abs(worldY - center.y) / radius;
-  const t1 = dy / HEX_UNIT_APOTHEM;
-  const t2 = dx + dy / HEX_SQRT3;
-  return Math.max(t1, t2) <= 1 + epsilon;
 }
 
 /** Compute the 4 world-space corner points of a rotated Overlay bounding box. */

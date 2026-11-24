@@ -89,7 +89,6 @@ export interface CalloutLayoutOptions {
   getOverlayPixelSize?: (overlay: OverlayPlacement) => { width: number; height: number } | null;
   skipHostCoord?: AxialCoord | null;
   skipOverlayId?: string | null;
-  hiddenHostCoords?: ReadonlySet<PlacementKey>;
   measureText?: (text: string, variant: 'tile' | 'overlay') => number;
   radius?: number;
 }
@@ -333,7 +332,6 @@ export function layoutAssemblyCallouts({
   getOverlayPixelSize,
   skipHostCoord = null,
   skipOverlayId = null,
-  hiddenHostCoords,
   measureText = defaultMeasureText,
   radius = HEX_RADIUS,
 }: CalloutLayoutOptions): AssemblyCalloutLayout {
@@ -352,9 +350,6 @@ export function layoutAssemblyCallouts({
       continue;
     }
     const key = axialKey(placement.q, placement.r);
-    if (hiddenHostCoords?.has(key)) {
-      continue;
-    }
 
     const { x: centerX, y: centerY } = axialToWorld(placement.q, placement.r, radius);
     const label = formatAssemblyLabel(placement, tilesetsById);
@@ -380,7 +375,7 @@ export function layoutAssemblyCallouts({
   }
 
   // Process Overlay callouts in deterministic visual reading order (top-to-bottom, left-to-right),
-  // and top-to-bottom within each host's Overlay stack so topmost pieces hold closest slots.
+  // and top-to-bottom within each host's Overlay stack so topmost Overlays hold closest slots.
   visibleHosts.sort((a, b) => {
     const dy = a.centerY - b.centerY;
     if (Math.abs(dy) > 1e-6) return dy;

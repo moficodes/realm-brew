@@ -7,11 +7,11 @@ import {
   HEX_RADIUS,
   HEX_WIDTH,
   axialToWorld,
-  hexCorners,
   rotationToRadians,
 } from '../domain/hexGeometry';
 import { findPlacementAt } from '../domain/plannerEngine';
 import type { AxialCoord, Placement, RotationStep, Tileset } from '../domain/types';
+import { traceHexPath } from './mapRenderer';
 
 export interface FogImageLookup {
   get: (url: string) => HTMLImageElement | null;
@@ -21,21 +21,6 @@ export interface FogImageLookup {
 export interface FogDragMovePreview {
   from: AxialCoord;
   to: AxialCoord | null;
-}
-
-function traceHex(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  radius: number,
-): void {
-  const corners = hexCorners(cx, cy, radius);
-  ctx.beginPath();
-  ctx.moveTo(corners[0].x, corners[0].y);
-  for (let i = 1; i < corners.length; i++) {
-    ctx.lineTo(corners[i].x, corners[i].y);
-  }
-  ctx.closePath();
 }
 
 function drawFogBadgeIcon(
@@ -93,7 +78,7 @@ function drawSingleFogCover(params: {
   if (mode === 'player') {
     // Opaque hex-clipped #1c1a18 base + #37 artwork cleanly clips revealed neighbors' overhangs
     ctx.save();
-    traceHex(ctx, cx, cy, HEX_RADIUS);
+    traceHexPath(ctx, cx, cy, HEX_RADIUS);
     ctx.clip();
     ctx.fillStyle = FOG_FALLBACK_FILL;
     ctx.fill();
@@ -108,7 +93,7 @@ function drawSingleFogCover(params: {
 
   // GM View: semi-transparent ~60% #37 cover + dashed border + subtle Fog badge
   ctx.save();
-  traceHex(ctx, cx, cy, HEX_RADIUS);
+  traceHexPath(ctx, cx, cy, HEX_RADIUS);
   ctx.clip();
   ctx.globalAlpha = gmAlpha;
   if (hasImage && fogImg) {
@@ -123,7 +108,7 @@ function drawSingleFogCover(params: {
 
   ctx.save();
   ctx.globalAlpha = Math.min(1, gmAlpha / 0.6);
-  traceHex(ctx, cx, cy, HEX_RADIUS - 3);
+  traceHexPath(ctx, cx, cy, HEX_RADIUS - 3);
   ctx.setLineDash([7, 5]);
   ctx.strokeStyle = 'rgba(148, 163, 184, 0.72)';
   ctx.lineWidth = Math.max(1.5, 2 / zoom);

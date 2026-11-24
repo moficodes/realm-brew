@@ -33,6 +33,13 @@ export function shouldYieldSpacePan(target: EventTarget | null): boolean {
   );
 }
 
+/** Round an angle in degrees and normalize it into [0, 360) without -0 for UI display. */
+export function formatDisplayDegrees(deg: number): number {
+  const rounded = Math.round(deg) % 360;
+  const normalized = rounded < 0 ? rounded + 360 : rounded;
+  return normalized === 0 ? 0 : normalized;
+}
+
 export function slugifyFilename(name: string): string {
   return (
     name

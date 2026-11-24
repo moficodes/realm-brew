@@ -296,7 +296,3 @@ export function discoverBundle(bundleDir: string | undefined): BundleDiscoveryRe
     bundleConfigured: true,
   };
 }
-
-export function discoverTilesets(bundleDir: string | undefined): BundleDiscoveryResult {
-  return discoverBundle(bundleDir);
-}

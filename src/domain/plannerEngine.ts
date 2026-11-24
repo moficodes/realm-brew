@@ -214,7 +214,7 @@ export interface LocatedOverlayPlacement {
   index: number;
 }
 
-/** Locate an Overlay Placement anywhere on a Map by its unique instance id. */
+/** Locate an Overlay Placement anywhere on a Map by its unique Overlay Placement id. */
 export function findOverlayById(
   placements: readonly Placement[],
   overlayId: string | null | undefined,
@@ -692,10 +692,10 @@ export function computeCollectionUsage(
   }
 
   const overBudgetOverlayIds = new Set<string>();
-  for (const [instanceId, key] of resolvedOverlays.entries()) {
+  for (const [overlayPlacementId, key] of resolvedOverlays.entries()) {
     const entry = byOverlayKey.get(key);
     if (entry?.isOverBudget) {
-      overBudgetOverlayIds.add(instanceId);
+      overBudgetOverlayIds.add(overlayPlacementId);
     }
   }
 
@@ -1610,7 +1610,7 @@ function pickPreferredPrefixLabel(labels: readonly string[]): string {
 }
 
 /**
- * Group an Overlay Pack's pieces under natural-sorted filename-prefix subheadings,
+ * Group an Overlay Pack's Overlays under natural-sorted filename-prefix subheadings,
  * merging case-insensitive singular/plural pairs, collecting singletons under a bottom
  * Other group, and omitting headings when a pack resolves to a single group.
  */
@@ -1630,6 +1630,7 @@ export function groupOverlaysByPrefix(overlays: readonly Overlay[]): OverlayPref
     bucket.overlays.push(overlay);
   }
 
+  // Keep the plural heading label when merging singular/plural pairs (e.g., Trap + Traps -> Traps, per #12).
   for (const pluralKey of Array.from(buckets.keys())) {
     const pluralBucket = buckets.get(pluralKey);
     if (!pluralBucket) continue;

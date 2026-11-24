@@ -7,16 +7,9 @@ import {
   type PullListSummary,
 } from '../domain/plannerEngine';
 import type { AxialCoord } from '../domain/types';
+import { CHECKERBOARD_MINI_STYLE } from './paletteStyles';
 
 export type PullListSubView = 'by-pack' | 'by-tile';
-
-const CHECKERBOARD_THUMB_STYLE = {
-  backgroundImage:
-    'linear-gradient(45deg, #272320 25%, transparent 25%), linear-gradient(-45deg, #272320 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #272320 75%), linear-gradient(-45deg, transparent 75%, #272320 75%)',
-  backgroundSize: '8px 8px',
-  backgroundPosition: '0 0, 0 4px, 4px -4px, -4px 0',
-  backgroundColor: '#1e1b18',
-};
 
 interface PullListPanelProps {
   mapName: string;
@@ -256,7 +249,7 @@ export function PullListPanel({
                           <img
                             src={item.url}
                             alt={item.label}
-                            style={CHECKERBOARD_THUMB_STYLE}
+                            style={CHECKERBOARD_MINI_STYLE}
                             className="h-8 w-8 shrink-0 rounded border border-[#2e2a26] object-contain p-0.5"
                           />
                           <span className="min-w-0 flex-1 truncate font-medium text-stone-100">
@@ -416,7 +409,7 @@ export function PullListPanel({
                           <img
                             src={ov.url}
                             alt={ov.label}
-                            style={CHECKERBOARD_THUMB_STYLE}
+                            style={CHECKERBOARD_MINI_STYLE}
                             className="h-8 w-8 shrink-0 rounded border border-[#2e2a26] object-contain p-0.5"
                           />
                         ) : (

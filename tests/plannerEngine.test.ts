@@ -811,7 +811,7 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
           { id: 'ov-4', overlayPackId: 'alchemists-workshop', overlayId: 'door-1', offsetX: 0, offsetY: 0, rotationDeg: 0 },
           { id: 'ov-5', overlayPackId: 'red-dragons-lair', overlayId: 'dragon-nest', offsetX: 0, offsetY: 0, rotationDeg: 15 },
           { id: 'ov-missing-pack', overlayPackId: 'future-pack', overlayId: 'table', offsetX: 0, offsetY: 0, rotationDeg: 0 },
-          { id: 'ov-missing-piece', overlayPackId: 'red-dragons-lair', overlayId: 'nonexistent', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-missing-overlay', overlayPackId: 'red-dragons-lair', overlayId: 'nonexistent', offsetX: 0, offsetY: 0, rotationDeg: 0 },
         ],
       },
     ];
@@ -855,7 +855,7 @@ describe('Planner engine Placement & Collection usage (Seam 2)', () => {
     expect(usage.overBudgetOverlayIds).toEqual(new Set(['ov-1', 'ov-2', 'ov-4', 'ov-5']));
     expect(usage.overBudgetOverlayIds.has('ov-3')).toBe(false);
     expect(usage.overBudgetOverlayIds.has('ov-missing-pack')).toBe(false);
-    expect(usage.overBudgetOverlayIds.has('ov-missing-piece')).toBe(false);
+    expect(usage.overBudgetOverlayIds.has('ov-missing-overlay')).toBe(false);
   });
 
   it('groups Overlays with natural sorting, (...) & number stripping, singular/plural merge, Other bucket, and single-group header omission', () => {
@@ -1933,7 +1933,7 @@ describe('Pull List v2: By Pack, By Tile, Missing Overlays, and Copy text (Seam 
         covered: true,
         overlays: [
           { id: 'ov-bot', overlayPackId: packMhd.id, overlayId: 'crate', offsetX: 0, offsetY: 0, rotationDeg: 0 },
-          { id: 'ov-mid', overlayPackId: 'missing-pack', overlayId: 'lost-prop', offsetX: 0.2, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-mid', overlayPackId: 'missing-pack', overlayId: 'lost-overlay', offsetX: 0.2, offsetY: 0, rotationDeg: 0 },
           { id: 'ov-top', overlayPackId: packMhd.id, overlayId: 'crate', offsetX: -0.2, offsetY: 0, rotationDeg: 45 },
         ],
       },
@@ -1981,7 +1981,7 @@ describe('Pull List v2: By Pack, By Tile, Missing Overlays, and Copy text (Seam 
     });
     expect(pullList.byTile[1].overlays[1]).toMatchObject({
       shortCode: '?missing-pack',
-      label: 'lost-prop',
+      label: 'lost-overlay',
       url: null,
       isOverBudget: false,
       isMissing: true,

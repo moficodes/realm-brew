@@ -864,7 +864,6 @@ export interface CanvasCalloutLayoutParams {
   overBudgetOverlayIds?: ReadonlySet<string>;
   skipHostCoord?: AxialCoord | null;
   skipOverlayId?: string | null;
-  hiddenHostCoords?: ReadonlySet<PlacementKey>;
 }
 
 /** Return loaded Overlay pixel dimensions, or null when missing/failed/loading. */
@@ -898,7 +897,6 @@ export function computeCanvasAssemblyCalloutLayout(
     overBudgetOverlayIds,
     skipHostCoord = null,
     skipOverlayId = null,
-    hiddenHostCoords,
   } = params;
 
   const measureText = (text: string, variant: 'tile' | 'overlay'): number => {
@@ -915,7 +913,6 @@ export function computeCanvasAssemblyCalloutLayout(
     getOverlayPixelSize: (ov) => getLoadedOverlayPixelSize(ov, overlayPacksById, imageCache),
     skipHostCoord,
     skipOverlayId,
-    hiddenHostCoords,
     measureText,
   });
 }
@@ -1146,7 +1143,7 @@ export function renderMapViewport({
     }
   }
 
-  // Pull List hover cross-highlighting (By Pack multi-piece or By Tile single piece, GM View only)
+  // Pull List hover cross-highlighting (By Pack multi-item or By Tile single-item, GM View only)
   if (viewMode === 'gm' && pullListHighlight && !overlayDrag && !dragMove) {
     drawPullListHighlightPass({
       ctx,

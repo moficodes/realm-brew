@@ -64,7 +64,7 @@ import type {
   TileBrushSelection,
   Tileset,
 } from '../domain/types';
-import { shouldYieldSpacePan } from '../utils/browserHelpers';
+import { formatDisplayDegrees, shouldYieldSpacePan } from '../utils/browserHelpers';
 import { OverlayContextMenu, type OverlayContextMenuState } from './OverlayContextMenu';
 
 interface CanvasViewportProps {
@@ -112,8 +112,8 @@ interface CanvasViewportProps {
     worldY: number,
   ) => void;
   onSetOverlayWorldRotation: (hostCoord: AxialCoord, overlayId: string, worldDeg: number) => void;
-  onRemoveAt: (coord: AxialCoord, keepBrush?: boolean) => void;
-  onRemoveOverlayAt: (hostCoord: AxialCoord, overlayId: string, keepBrush?: boolean) => void;
+  onRemoveAt: (coord: AxialCoord) => void;
+  onRemoveOverlayAt: (hostCoord: AxialCoord, overlayId: string) => void;
   onRotateAction: (delta: 1 | -1) => void;
   onFlipAction: () => void;
   onExpandInspector: () => void;
@@ -129,11 +129,6 @@ interface CanvasViewportProps {
 
 const EMPTY_OVER_BUDGET_COORDS = new Set<PlacementKey>();
 const EMPTY_OVER_BUDGET_OVERLAY_IDS = new Set<string>();
-
-function displayDeg(deg: number): number {
-  const rounded = Math.round(deg) % 360;
-  return rounded < 0 ? rounded + 360 : rounded;
-}
 
 export function CanvasViewport({
   placements,
@@ -1122,7 +1117,7 @@ export function CanvasViewport({
             onContextMenuChange(null);
           }}
           onDeleteOverlay={(hostCoord, overlayId) => {
-            onRemoveOverlayAt(hostCoord, overlayId, true);
+            onRemoveOverlayAt(hostCoord, overlayId);
             onContextMenuChange(null);
           }}
           onSelectHost={(coord) => {
@@ -1130,7 +1125,7 @@ export function CanvasViewport({
             onContextMenuChange(null);
           }}
           onDeleteHost={(coord) => {
-            onRemoveAt(coord, true);
+            onRemoveAt(coord);
             onContextMenuChange(null);
           }}
         />
@@ -1183,7 +1178,7 @@ export function CanvasViewport({
                   {overlayBrushLabel}
                 </span>
                 <span className="rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-300">
-                  {displayDeg(activeOverlayBrush.rotationDeg)}°
+                  {formatDisplayDegrees(activeOverlayBrush.rotationDeg)}°
                 </span>
                 <button
                   type="button"
@@ -1269,7 +1264,7 @@ export function CanvasViewport({
                   {focusedLabel}
                 </span>
                 <span className="rounded bg-[#1c1917] px-1.5 py-0.5 font-mono text-[11px] text-stone-300">
-                  {displayDeg(focusedMatch.overlay.rotationDeg)}°
+                  {formatDisplayDegrees(focusedMatch.overlay.rotationDeg)}°
                 </span>
                 <button
                   type="button"

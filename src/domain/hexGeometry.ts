@@ -33,7 +33,7 @@ export interface WorldBounds extends BoundingBox {
 
 export const DEFAULT_CAMERA: Camera = { x: 0, y: 0, zoom: 1 };
 
-function normalizeZero(n: number): number {
+export function normalizeZero(n: number): number {
   return n === 0 ? 0 : n;
 }
 
@@ -91,6 +91,24 @@ export function rotationToRadians(rotation: RotationStep): number {
 const SQRT3 = Math.sqrt(3);
 const UNIT_HEX_APOTHEM = SQRT3 / 2;
 
+function flatTopUnitHexNorm(nx: number, ny: number): number {
+  return Math.max(Math.abs(ny) / UNIT_HEX_APOTHEM, Math.abs(nx) + Math.abs(ny) / SQRT3);
+}
+
+/** Return true if a world-space point lies inside or on the boundary of a flat-top hex. */
+export function isPointInFlatTopHex(
+  worldX: number,
+  worldY: number,
+  hostCoord: AxialCoord,
+  radius = HEX_RADIUS,
+  epsilon = 1e-6,
+): boolean {
+  const center = axialToWorld(hostCoord.q, hostCoord.r, radius);
+  const nx = (worldX - center.x) / radius;
+  const ny = (worldY - center.y) / radius;
+  return flatTopUnitHexNorm(nx, ny) <= 1 + epsilon;
+}
+
 export function normalizeRotationDeg(deg: number): number {
   const mod = deg % 360;
   const normalized = mod < 0 ? mod + 360 : mod;
@@ -110,16 +128,14 @@ export function clampOffsetToUnitHex(
   if (maxAbs > 1e100) {
     const nx = offsetX / maxAbs;
     const ny = offsetY / maxAbs;
-    const t = Math.max(Math.abs(ny) / UNIT_HEX_APOTHEM, Math.abs(nx) + Math.abs(ny) / SQRT3);
+    const t = flatTopUnitHexNorm(nx, ny);
     return {
       offsetX: normalizeZero(nx / t),
       offsetY: normalizeZero(ny / t),
     };
   }
 
-  const t1 = absY / UNIT_HEX_APOTHEM;
-  const t2 = absX + absY / SQRT3;
-  const t = Math.max(t1, t2);
+  const t = flatTopUnitHexNorm(offsetX, offsetY);
   if (t > 1) {
     return {
       offsetX: normalizeZero(offsetX / t),

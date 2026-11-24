@@ -11,7 +11,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { axialKey } from '../domain/hexGeometry';
 import { overlayLocalToWorld } from '../domain/overlayGeometry';
 import {
   canFlipTarget,
@@ -20,14 +19,14 @@ import {
   resolvePlacementAsset,
 } from '../domain/plannerEngine';
 import type { AxialCoord, OverlayPack, OverlayPlacement, Placement, Tileset } from '../domain/types';
+import { formatDisplayDegrees } from '../utils/browserHelpers';
+import { CHECKERBOARD_MINI_STYLE } from './paletteStyles';
 
 export interface HostInspectorPanelProps {
-  placements: readonly Placement[];
   selectedHost: Placement | undefined;
   focusedOverlayId: string | null;
   tilesetsById: ReadonlyMap<string, Tileset>;
   overlayPacksById: ReadonlyMap<string, OverlayPack>;
-  onSelectHostCoord: (coord: AxialCoord) => void;
   onFocusOverlayId: (overlayId: string | null) => void;
   onHoverOverlayId: (overlayId: string | null) => void;
   onRotateHost: (coord: AxialCoord, delta: 1 | -1) => void;
@@ -44,26 +43,11 @@ export interface HostInspectorPanelProps {
   ) => void;
 }
 
-function displayDeg(deg: number): number {
-  const rounded = Math.round(deg) % 360;
-  return rounded < 0 ? rounded + 360 : rounded;
-}
-
-const CHECKERBOARD_MINI_STYLE = {
-  backgroundImage:
-    'linear-gradient(45deg, #272320 25%, transparent 25%), linear-gradient(-45deg, #272320 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #272320 75%), linear-gradient(-45deg, transparent 75%, #272320 75%)',
-  backgroundSize: '8px 8px',
-  backgroundPosition: '0 0, 0 4px, 4px -4px, -4px 0',
-  backgroundColor: '#1e1b18',
-};
-
 export function HostInspectorPanel({
-  placements,
   selectedHost,
   focusedOverlayId,
   tilesetsById,
   overlayPacksById,
-  onSelectHostCoord,
   onFocusOverlayId,
   onHoverOverlayId,
   onRotateHost,
@@ -91,61 +75,29 @@ export function HostInspectorPanel({
     draftDeg: number;
   } | null>(null);
   const commitSliderRef = useRef<() => void>(() => {});
+  const onPreviewOverlayRotationRef = useRef(onPreviewOverlayRotation);
+  onPreviewOverlayRotationRef.current = onPreviewOverlayRotation;
 
   useEffect(() => {
     sliderDragRef.current = null;
     setSliderDraftDeg(null);
-    onPreviewOverlayRotation(null);
-  }, [focusedOverlay?.id, selectedHost?.q, selectedHost?.r, onPreviewOverlayRotation]);
+    onPreviewOverlayRotationRef.current(null);
+  }, [focusedOverlay?.id, selectedHost?.q, selectedHost?.r]);
 
   useEffect(() => {
     return () => {
       window.removeEventListener('pointerup', commitSliderRef.current);
       window.removeEventListener('pointercancel', commitSliderRef.current);
+      sliderDragRef.current = null;
+      onPreviewOverlayRotationRef.current(null);
     };
   }, []);
 
   if (!selectedHost) {
     return (
       <div className="rb-scroll flex-1 overflow-y-auto p-3">
-        <div className="space-y-3">
-          <div className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-3 text-xs text-stone-400">
-            Click any placed Tile to inspect its facing, attached Overlays, and stacking order.
-          </div>
-          <div className="space-y-1.5">
-            <div className="text-[11px] font-semibold tracking-wider text-stone-500 uppercase">
-              Placed Tiles ({placements.length})
-            </div>
-            {placements.map((p) => {
-              const count = p.overlays?.length ?? 0;
-              return (
-                <button
-                  key={axialKey(p.q, p.r)}
-                  type="button"
-                  onClick={() => onSelectHostCoord({ q: p.q, r: p.r })}
-                  className="flex w-full items-center justify-between rounded-md border border-[#2e2a26] bg-[#1c1917] px-2.5 py-2 text-left text-xs transition hover:border-amber-500/50"
-                >
-                  <span className="font-mono font-semibold text-amber-300">
-                    {formatAssemblyLabel(p, tilesetsById)}{' '}
-                    <span className="text-stone-500">
-                      ({p.q},{p.r})
-                    </span>
-                  </span>
-                  <div className="flex items-center gap-1">
-                    {p.covered && (
-                      <span className="inline-flex items-center gap-0.5 rounded border border-slate-500/40 bg-slate-800/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-200">
-                        <CloudFog className="h-2.5 w-2.5" />
-                        Fog
-                      </span>
-                    )}
-                    <span className="rounded bg-stone-800 px-1.5 py-0.5 text-[10px] text-stone-300">
-                      {count} {count === 1 ? 'Overlay' : 'Overlays'}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+        <div className="rounded-lg border border-[#2e2a26] bg-[#1c1917] p-3 text-xs text-stone-400">
+          Click any placed Tile to inspect its facing, attached Overlays, and stacking order.
         </div>
       </div>
     );
@@ -179,7 +131,7 @@ export function HostInspectorPanel({
     : '';
   const activeSliderDeg =
     focusedOverlay !== null
-      ? sliderDraftDeg ?? displayDeg(focusedOverlay.rotationDeg)
+      ? sliderDraftDeg ?? formatDisplayDegrees(focusedOverlay.rotationDeg)
       : 0;
   const focusedWorldDeg =
     focusedOverlay !== null
@@ -371,7 +323,7 @@ export function HostInspectorPanel({
                         <div className="truncate text-xs font-medium text-stone-100">{label}</div>
                         <div className="flex items-center gap-1.5 font-mono text-[10px] text-stone-400">
                           <span>
-                            z {realIdx + 1} · {displayDeg(ov.rotationDeg)}°
+                            z {realIdx + 1} · {formatDisplayDegrees(ov.rotationDeg)}°
                           </span>
                           {isMissing && (
                             <span className="rounded bg-amber-950/70 px-1 py-0.2 text-[9px] font-semibold text-amber-300">
@@ -472,7 +424,7 @@ export function HostInspectorPanel({
                 aria-label="Overlay rotation degrees"
                 value={activeSliderDeg}
                 onPointerDown={() => {
-                  const startDeg = displayDeg(focusedOverlay.rotationDeg);
+                  const startDeg = formatDisplayDegrees(focusedOverlay.rotationDeg);
                   sliderDragRef.current = {
                     hostCoord,
                     overlayId: focusedOverlay.id,
@@ -516,7 +468,7 @@ export function HostInspectorPanel({
                 Offset: ({focusedOverlay.offsetX.toFixed(2)}, {focusedOverlay.offsetY.toFixed(2)}) R
               </div>
               <div>
-                Local: {activeSliderDeg}° · World: {displayDeg(focusedWorldDeg)}°
+                Local: {activeSliderDeg}° · World: {formatDisplayDegrees(focusedWorldDeg)}°
               </div>
             </div>
           </div>

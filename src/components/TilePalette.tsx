@@ -19,6 +19,7 @@ import type {
   TileFace,
   Tileset,
 } from '../domain/types';
+import { CHECKERBOARD_STYLE } from './paletteStyles';
 
 export type PaletteTab = 'tiles' | 'overlays';
 
@@ -48,14 +49,6 @@ interface TilePaletteProps {
   scrollPositionsRef?: MutableRefObject<{ tiles: number; overlays: number }>;
   bundleError?: string;
 }
-
-const CHECKERBOARD_STYLE = {
-  backgroundImage:
-    'linear-gradient(45deg, #272320 25%, transparent 25%), linear-gradient(-45deg, #272320 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #272320 75%), linear-gradient(-45deg, transparent 75%, #272320 75%)',
-  backgroundSize: '12px 12px',
-  backgroundPosition: '0 0, 0 6px, 6px -6px, -6px 0',
-  backgroundColor: '#1e1b18',
-};
 
 function RemainingBadge({ remaining, compact = false }: { remaining: number; compact?: boolean }) {
   const isDepletedOrOver = remaining <= 0;
