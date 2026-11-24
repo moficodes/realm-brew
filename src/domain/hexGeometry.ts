@@ -17,11 +17,14 @@ export interface Camera {
   zoom: number;
 }
 
-export interface WorldBounds {
+export interface BoundingBox {
   minX: number;
   minY: number;
   maxX: number;
   maxY: number;
+}
+
+export interface WorldBounds extends BoundingBox {
   width: number;
   height: number;
   centerX: number;
@@ -244,14 +247,40 @@ export function computeFitCamera(
   };
 }
 
-export function computeExportBounds(
-  placements: readonly Pick<Placement, 'q' | 'r'>[],
-  paddingWorld = 24,
-  radius = HEX_RADIUS,
+/** Return the union WorldBounds across all non-null bounding boxes, or null when none. */
+export function unionBoundingBoxes(
+  boxes: readonly (BoundingBox | null | undefined)[],
 ): WorldBounds | null {
-  const bounds = computePlacementsWorldBounds(placements, radius);
-  if (!bounds) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let hasAny = false;
 
+  for (const box of boxes) {
+    if (!box) continue;
+    hasAny = true;
+    if (box.minX < minX) minX = box.minX;
+    if (box.minY < minY) minY = box.minY;
+    if (box.maxX > maxX) maxX = box.maxX;
+    if (box.maxY > maxY) maxY = box.maxY;
+  }
+
+  if (!hasAny) return null;
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY,
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
+  };
+}
+
+/** Expand a BoundingBox uniformly on all four sides by paddingWorld. */
+export function padWorldBounds(bounds: BoundingBox, paddingWorld: number): WorldBounds {
   const minX = bounds.minX - paddingWorld;
   const minY = bounds.minY - paddingWorld;
   const maxX = bounds.maxX + paddingWorld;
@@ -263,9 +292,25 @@ export function computeExportBounds(
     maxY,
     width: maxX - minX,
     height: maxY - minY,
-    centerX: bounds.centerX,
-    centerY: bounds.centerY,
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
   };
+}
+
+export function computeExportBounds(
+  placements: readonly Pick<Placement, 'q' | 'r'>[],
+  paddingWorld = 24,
+  radius = HEX_RADIUS,
+  extraBounds?: readonly (BoundingBox | null | undefined)[],
+): WorldBounds | null {
+  const baseBounds = computePlacementsWorldBounds(placements, radius);
+  if (!baseBounds) return null;
+
+  const combined = extraBounds && extraBounds.length > 0
+    ? unionBoundingBoxes([baseBounds, ...extraBounds])!
+    : baseBounds;
+
+  return padWorldBounds(combined, paddingWorld);
 }
 
 /**

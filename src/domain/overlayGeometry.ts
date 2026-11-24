@@ -9,6 +9,7 @@ import {
   computePlacementsWorldBounds,
   normalizeRotationDeg,
   rotationToRadians,
+  type BoundingBox,
   type Camera,
   type Point2D,
   type WorldBounds,
@@ -478,4 +479,43 @@ export function computeFitCameraWithOverlays(
     y: bounds.centerY,
     zoom: clampZoom(fitZoom),
   };
+}
+
+export interface VisibleOverlayBoundsOptions {
+  getOverlayPixelSize?: (overlay: OverlayPlacement) => { width: number; height: number } | null;
+  excludeCoveredHosts?: boolean;
+  radius?: number;
+}
+
+/**
+ * Compute the union world bounding box across all visible Overlay Placements' exact rotated
+ * OBBs (1:1 HEX_WIDTH/1200 scale or 72x44 missing fallback), or null when none are visible.
+ */
+export function computeVisibleOverlaysWorldBounds(
+  placements: readonly Placement[],
+  options: VisibleOverlayBoundsOptions = {},
+): BoundingBox | null {
+  const { getOverlayPixelSize, excludeCoveredHosts = false, radius = HEX_RADIUS } = options;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let hasAny = false;
+
+  for (const host of placements) {
+    if (excludeCoveredHosts && host.covered) continue;
+    for (const overlay of host.overlays ?? []) {
+      const t = overlayLocalToWorld(host, overlay, radius);
+      const pixelSize = getOverlayPixelSize ? getOverlayPixelSize(overlay) : null;
+      const { width, height } = getOverlayWorldSize(pixelSize);
+      const box = computeOverlayWorldBounds(t.x, t.y, width, height, t.worldRad);
+      hasAny = true;
+      if (box.minX < minX) minX = box.minX;
+      if (box.minY < minY) minY = box.minY;
+      if (box.maxX > maxX) maxX = box.maxX;
+      if (box.maxY > maxY) maxY = box.maxY;
+    }
+  }
+
+  return hasAny ? { minX, minY, maxX, maxY } : null;
 }

@@ -2,10 +2,13 @@ import {
   HEX_RADIUS,
   axialKey,
   axialToWorld,
+  computeExportBounds,
   rotationToRadians,
   type Point2D,
+  type WorldBounds,
 } from './hexGeometry';
 import {
+  computeVisibleOverlaysWorldBounds,
   doesOverlayBoxOverhangHostHex,
   getOverlayWorldSize,
   overlayLocalToWorld,
@@ -476,4 +479,67 @@ export function getCalloutLayoutBounds(layout: AssemblyCalloutLayout): CalloutBo
     expand(ov.pillRect);
   }
   return { minX, minY, maxX, maxY };
+}
+
+export type ExportFogMode = 'gm' | 'player' | 'none';
+
+export interface MapExportBoundsOptions {
+  paddingWorld?: number;
+  fogMode?: ExportFogMode;
+  includeLabels?: boolean;
+  tilesetsById?: ReadonlyMap<string, Tileset>;
+  overlayPacksById?: ReadonlyMap<string, OverlayPack>;
+  getOverlayPixelSize?: (overlay: OverlayPlacement) => { width: number; height: number } | null;
+  calloutLayout?: AssemblyCalloutLayout | null;
+  measureText?: (text: string, variant: 'tile' | 'overlay') => number;
+  radius?: number;
+}
+
+/**
+ * Compute tightly cropped PNG export bounds unioning host hexes, exact rotated world boxes
+ * of visible Overlay Placements (excluding covered hosts' Overlays in Player Fog), and rendered
+ * Assembly Callout pills when enabled outside Player Fog, before applying paddingWorld (28u default).
+ */
+export function computeMapExportBounds(
+  placements: readonly Placement[],
+  options: MapExportBoundsOptions = {},
+): WorldBounds | null {
+  if (placements.length === 0) return null;
+
+  const {
+    paddingWorld = 28,
+    fogMode = 'gm',
+    includeLabels = false,
+    tilesetsById,
+    overlayPacksById,
+    getOverlayPixelSize,
+    calloutLayout,
+    measureText,
+    radius = HEX_RADIUS,
+  } = options;
+
+  const overlayBounds = computeVisibleOverlaysWorldBounds(placements, {
+    getOverlayPixelSize,
+    excludeCoveredHosts: fogMode === 'player',
+    radius,
+  });
+
+  let calloutBounds: CalloutBox | null = null;
+  if (includeLabels && fogMode !== 'player') {
+    const resolvedLayout =
+      calloutLayout ??
+      (tilesetsById && overlayPacksById
+        ? layoutAssemblyCallouts({
+            placements,
+            tilesetsById,
+            overlayPacksById,
+            getOverlayPixelSize,
+            measureText,
+            radius,
+          })
+        : null);
+    calloutBounds = resolvedLayout ? getCalloutLayoutBounds(resolvedLayout) : null;
+  }
+
+  return computeExportBounds(placements, paddingWorld, radius, [overlayBounds, calloutBounds]);
 }

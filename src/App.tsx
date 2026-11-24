@@ -1244,7 +1244,11 @@ export function App() {
         onRedo={handleRedo}
         onRequestClearMap={() => setClearConfirmOpen(true)}
         onOpenCollection={() => setCollectionDialogOpen(true)}
-        onOpenPngExport={() => setPngExportOpen(true)}
+        onOpenPngExport={() => {
+          if (viewModeRef.current === 'gm') {
+            setPngExportOpen(true);
+          }
+        }}
         viewMode={viewMode}
         onChangeViewMode={handleChangeViewMode}
         fogToolActive={fogToolActive}
@@ -1396,18 +1400,23 @@ export function App() {
       />
 
       <PngExportDialog
-        open={pngExportOpen}
+        open={viewMode === 'gm' && pngExportOpen}
         onClose={() => setPngExportOpen(false)}
         mapName={activeMap?.name ?? 'Untitled Map'}
         placementCount={placements.length}
+        overlayCount={overlayCount}
+        coveredCount={coveredCount}
         defaultIncludeLabels={showLabels}
-        onExport={async ({ background, includeLabels }) => {
+        onExport={async ({ background, includeLabels, fogMode }) => {
+          if (viewModeRef.current !== 'gm') return;
           await exportMapAsPng({
             mapName: activeMap?.name ?? 'Untitled Map',
             placements,
             tilesetsById,
+            overlayPacksById,
             background,
             includeLabels,
+            fogMode,
           });
         }}
       />

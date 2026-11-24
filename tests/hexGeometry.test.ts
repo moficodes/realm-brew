@@ -27,6 +27,7 @@ import {
   computeFitCameraWithOverlays,
   computeFitWorldBounds,
   computeOverlayWorldBounds,
+  computeVisibleOverlaysWorldBounds,
   doesOverlayOverhangHostHex,
   getOverlayDialGeometry,
   getOverlayOBBCorners,
@@ -42,10 +43,12 @@ import {
 import {
   OVERLAY_CALLOUT_HEIGHT,
   OVERLAY_CALLOUT_MAX_WIDTH,
+  computeMapExportBounds,
   getCalloutLayoutBounds,
   layoutAssemblyCallouts,
   type CalloutBox,
 } from '../src/domain/calloutLayout';
+import { formatExportPngFilename } from '../src/canvas/pngExporter';
 import type { OverlayPack, Placement, Tileset } from '../src/domain/types';
 
 describe('Flat-top hex geometry (Seam 2)', () => {
@@ -904,5 +907,301 @@ describe('World-space Assembly Callouts & collision solver (Seam 3)', () => {
         getOverlayAssetState,
       }),
     ).toEqual({ x: 0, y: 0, zoom: 1 });
+  });
+});
+
+describe('PNG export v2 bounds with Overlays, Fog of War, and callouts (Seam 3)', () => {
+  it('unions overhanging rotated Overlay Placements with host hexes before applying padding', () => {
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          {
+            id: 'ov-bridge',
+            overlayPackId: 'mhd-overlays',
+            overlayId: 'bridge',
+            offsetX: 0.7,
+            offsetY: 0,
+            rotationDeg: 90,
+          },
+        ],
+      },
+    ];
+
+    const overlayBounds = computeVisibleOverlaysWorldBounds(placements, {
+      getOverlayPixelSize: () => ({ width: 1200, height: 600 }),
+    });
+    expect(overlayBounds).not.toBeNull();
+    expect(overlayBounds!.minX).toBeCloseTo(20, 8);
+    expect(overlayBounds!.maxX).toBeCloseTo(120, 8);
+    expect(overlayBounds!.minY).toBeCloseTo(-100, 8);
+    expect(overlayBounds!.maxY).toBeCloseTo(100, 8);
+
+    const exportBounds = computeExportBounds(placements, 28, HEX_RADIUS, [overlayBounds])!;
+    expect(exportBounds.minX).toBeCloseTo(-128, 8);
+    expect(exportBounds.maxX).toBeCloseTo(148, 8);
+    expect(exportBounds.minY).toBeCloseTo(-128, 8);
+    expect(exportBounds.maxY).toBeCloseTo(128, 8);
+    expect(exportBounds.width).toBeCloseTo(276, 8);
+    expect(exportBounds.height).toBeCloseTo(256, 8);
+    expect(exportBounds.centerX).toBeCloseTo(10, 8);
+    expect(exportBounds.centerY).toBeCloseTo(0, 8);
+  });
+
+  it('includes 72x44 missing-Overlay placeholders and excludes hidden covered-host overhangs in Player Fog', () => {
+    const missingOverhang: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          {
+            id: 'ov-missing-rim',
+            overlayPackId: 'missing-pack',
+            overlayId: 'missing-prop',
+            offsetX: 0.9,
+            offsetY: 0,
+            rotationDeg: 90,
+          },
+        ],
+      },
+    ];
+
+    const missingBounds = computeMapExportBounds(missingOverhang, {
+      paddingWorld: 28,
+      fogMode: 'gm',
+      getOverlayPixelSize: () => null,
+    })!;
+    expect(missingBounds.minX).toBeCloseTo(-HEX_RADIUS - 28, 8);
+    expect(missingBounds.maxX).toBeCloseTo(90 + MISSING_OVERLAY_HEIGHT / 2 + 28, 8);
+    expect(missingBounds.minY).toBeCloseTo(-HEX_HEIGHT / 2 - 28, 8);
+    expect(missingBounds.maxY).toBeCloseTo(HEX_HEIGHT / 2 + 28, 8);
+
+    const mixedFogMap: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          {
+            id: 'ov-covered-overhang',
+            overlayPackId: 'mhd-overlays',
+            overlayId: 'giant-bridge',
+            offsetX: -0.9,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 2,
+        rotation: 0,
+        overlays: [
+          {
+            id: 'ov-revealed-overhang',
+            overlayPackId: 'mhd-overlays',
+            overlayId: 'table',
+            offsetX: 0.9,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+        ],
+      },
+    ];
+
+    const getPixelSize = (ov: { overlayId: string }) =>
+      ov.overlayId === 'giant-bridge'
+        ? { width: 1200, height: 600 } // 200x100 world
+        : { width: 600, height: 300 }; // 100x50 world
+
+    const gmBounds = computeMapExportBounds(mixedFogMap, {
+      paddingWorld: 28,
+      fogMode: 'gm',
+      getOverlayPixelSize: getPixelSize,
+    })!;
+    const noFogBounds = computeMapExportBounds(mixedFogMap, {
+      paddingWorld: 28,
+      fogMode: 'none',
+      getOverlayPixelSize: getPixelSize,
+    })!;
+    const playerBounds = computeMapExportBounds(mixedFogMap, {
+      paddingWorld: 28,
+      fogMode: 'player',
+      getOverlayPixelSize: getPixelSize,
+    })!;
+
+    expect(gmBounds).toEqual(noFogBounds);
+    expect(gmBounds.minX).toBeCloseTo(-190 - 28, 8);
+    expect(gmBounds.maxX).toBeCloseTo(290 + 28, 8);
+
+    // Player Fog keeps the covered host hex (-100) for #37 cover and revealed overhang (290),
+    // while excluding the hidden overhang (-190) on the covered host.
+    expect(playerBounds.minX).toBeCloseTo(-HEX_RADIUS - 28, 8);
+    expect(playerBounds.maxX).toBeCloseTo(290 + 28, 8);
+    expect(playerBounds.minY).toBeCloseTo(-HEX_HEIGHT / 2 - 28, 8);
+    expect(playerBounds.maxY).toBeCloseTo(HEX_HEIGHT + 28, 8);
+  });
+
+  it('unions rendered assembly callout pill rectangles when labels are enabled and excludes them in Player Fog', () => {
+    const mhdTileset: Tileset = {
+      id: 'man-hewn-dungeons',
+      name: 'Man Hewn Dungeons',
+      shortCode: 'MHD',
+      tiles: [
+        {
+          tileId: '01-02',
+          tilesetId: 'man-hewn-dungeons',
+          isSymmetric: false,
+          faceA: { faceNumber: 1, label: '01', filename: '01.png', url: '/api/assets/man-hewn-dungeons/01.png' },
+          faceB: { faceNumber: 2, label: '02', filename: '02.png', url: '/api/assets/man-hewn-dungeons/02.png' },
+        },
+      ],
+    };
+    const awPack: OverlayPack = {
+      id: 'alchemists-workshop',
+      name: "Alchemists' Workshop",
+      shortCode: 'AW',
+      pairedTilesetId: null,
+      overlays: [
+        {
+          overlayId: 'bench',
+          overlayPackId: 'alchemists-workshop',
+          label: 'Alchemical Workbench Table',
+          filename: 'Alchemical Workbench Table.png',
+          url: '/api/overlay-assets/alchemists-workshop/Alchemical%20Workbench%20Table.png',
+        },
+      ],
+    };
+    const tilesetsById = new Map([[mhdTileset.id, mhdTileset]]);
+    const overlayPacksById = new Map([[awPack.id, awPack]]);
+
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhdTileset.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          {
+            id: 'ov-rim-callout',
+            overlayPackId: awPack.id,
+            overlayId: 'bench',
+            offsetX: 0.9,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+        ],
+      },
+    ];
+
+    const smallPixelSize = () => ({ width: 60, height: 60 }); // 10x10 world, stays inside hex
+
+    const noLabelBounds = computeMapExportBounds(placements, {
+      paddingWorld: 28,
+      fogMode: 'gm',
+      includeLabels: false,
+      tilesetsById,
+      overlayPacksById,
+      getOverlayPixelSize: smallPixelSize,
+    })!;
+    expect(noLabelBounds.maxX).toBeCloseTo(HEX_RADIUS + 28, 8);
+
+    const layout = layoutAssemblyCallouts({
+      placements,
+      tilesetsById,
+      overlayPacksById,
+      getOverlayPixelSize: smallPixelSize,
+    });
+    const calloutBox = getCalloutLayoutBounds(layout)!;
+    expect(calloutBox.maxX).toBeGreaterThan(HEX_RADIUS);
+
+    const gmLabelBounds = computeMapExportBounds(placements, {
+      paddingWorld: 28,
+      fogMode: 'gm',
+      includeLabels: true,
+      tilesetsById,
+      overlayPacksById,
+      getOverlayPixelSize: smallPixelSize,
+    })!;
+    expect(gmLabelBounds.maxX).toBeCloseTo(calloutBox.maxX + 28, 8);
+    expect(gmLabelBounds.minX).toBeCloseTo(Math.min(-HEX_RADIUS, calloutBox.minX) - 28, 8);
+    expect(gmLabelBounds.minY).toBeCloseTo(Math.min(-HEX_HEIGHT / 2, calloutBox.minY) - 28, 8);
+    expect(gmLabelBounds.maxY).toBeCloseTo(Math.max(HEX_HEIGHT / 2, calloutBox.maxY) + 28, 8);
+
+    // Even if includeLabels is passed with Player Fog, spoiler safety omits callout pills
+    const playerDefendedBounds = computeMapExportBounds(placements, {
+      paddingWorld: 28,
+      fogMode: 'player',
+      includeLabels: true,
+      tilesetsById,
+      overlayPacksById,
+      getOverlayPixelSize: smallPixelSize,
+    })!;
+    expect(playerDefendedBounds.minX).toBeCloseTo(-HEX_RADIUS - 28, 8);
+    expect(playerDefendedBounds.maxX).toBeCloseTo(HEX_RADIUS + 28, 8);
+    expect(playerDefendedBounds.minY).toBeCloseTo(-HEX_HEIGHT / 2 - 28, 8);
+    expect(playerDefendedBounds.maxY).toBeCloseTo(HEX_HEIGHT / 2 + 28, 8);
+
+    // Empty map always returns null
+    expect(computeMapExportBounds([], { includeLabels: true })).toBeNull();
+  });
+
+  it('computes exact diagonal rotated OBB overhangs and formats Fog-aware PNG export filenames', () => {
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          {
+            id: 'ov-diag',
+            overlayPackId: 'mhd-overlays',
+            overlayId: 'rug',
+            offsetX: 0.8,
+            offsetY: 0,
+            rotationDeg: 45,
+          },
+        ],
+      },
+    ];
+
+    // 600x600 px -> 100x100 world square at (80, 0) rotated 45° -> maxX = 80 + 50*sqrt(2)
+    const bounds = computeMapExportBounds(placements, {
+      paddingWorld: 28,
+      getOverlayPixelSize: () => ({ width: 600, height: 600 }),
+    })!;
+    expect(bounds.minX).toBeCloseTo(-HEX_RADIUS - 28, 8);
+    expect(bounds.maxX).toBeCloseTo(80 + 50 * Math.SQRT2 + 28, 8);
+    expect(bounds.minY).toBeCloseTo(-HEX_HEIGHT / 2 - 28, 8);
+    expect(bounds.maxY).toBeCloseTo(HEX_HEIGHT / 2 + 28, 8);
+
+    expect(formatExportPngFilename('Goblin Cave!', 'gm', 2)).toBe('goblin-cave-gm.png');
+    expect(formatExportPngFilename('Goblin Cave!', 'player', 2)).toBe('goblin-cave-player.png');
+    expect(formatExportPngFilename('Goblin Cave!', 'none', 2)).toBe('goblin-cave.png');
+    expect(formatExportPngFilename('Goblin Cave!', 'gm', 0)).toBe('goblin-cave.png');
+    expect(formatExportPngFilename('Goblin Cave!', 'player', 0)).toBe('goblin-cave.png');
+    expect(formatExportPngFilename('!!!', 'player', 1)).toBe('realm-brew-map-player.png');
   });
 });
