@@ -1,5 +1,5 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, Layers, Search, Sparkles, X } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef } from 'react';
+import { useLayoutEffect, useMemo, useRef, type MutableRefObject } from 'react';
 import {
   buildOverlayPaletteSections,
   groupOverlaysByPrefix,
@@ -45,6 +45,7 @@ interface TilePaletteProps {
   onDragBrushEnd: () => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  scrollPositionsRef?: MutableRefObject<{ tiles: number; overlays: number }>;
   bundleError?: string;
 }
 
@@ -300,21 +301,22 @@ export function TilePalette({
   onDragBrushEnd,
   collapsed,
   onToggleCollapse,
+  scrollPositionsRef,
   bundleError,
 }: TilePaletteProps) {
   const tilesScrollRef = useRef<HTMLDivElement>(null);
   const overlaysScrollRef = useRef<HTMLDivElement>(null);
-  const tilesScrollTopRef = useRef(0);
-  const overlaysScrollTopRef = useRef(0);
+  const localScrollPositionsRef = useRef({ tiles: 0, overlays: 0 });
+  const resolvedScrollPositionsRef = scrollPositionsRef ?? localScrollPositionsRef;
 
   useLayoutEffect(() => {
     if (collapsed) return;
     if (activeTab === 'tiles' && tilesScrollRef.current) {
-      tilesScrollRef.current.scrollTop = tilesScrollTopRef.current;
+      tilesScrollRef.current.scrollTop = resolvedScrollPositionsRef.current.tiles;
     } else if (activeTab === 'overlays' && overlaysScrollRef.current) {
-      overlaysScrollRef.current.scrollTop = overlaysScrollTopRef.current;
+      overlaysScrollRef.current.scrollTop = resolvedScrollPositionsRef.current.overlays;
     }
-  }, [activeTab, collapsed]);
+  }, [activeTab, collapsed, resolvedScrollPositionsRef]);
 
   const orderedOverlayPacks = useMemo(
     () => sortOverlayPacksPairedFirst(overlayPacks, tilesets),
@@ -561,7 +563,7 @@ export function TilePalette({
       <div
         ref={tilesScrollRef}
         onScroll={(e) => {
-          tilesScrollTopRef.current = e.currentTarget.scrollTop;
+          resolvedScrollPositionsRef.current.tiles = e.currentTarget.scrollTop;
         }}
         className={activeTab === 'tiles' ? 'rb-scroll flex-1 overflow-y-auto px-2.5 py-2.5' : 'hidden'}
       >
@@ -671,7 +673,7 @@ export function TilePalette({
       <div
         ref={overlaysScrollRef}
         onScroll={(e) => {
-          overlaysScrollTopRef.current = e.currentTarget.scrollTop;
+          resolvedScrollPositionsRef.current.overlays = e.currentTarget.scrollTop;
         }}
         className={activeTab === 'overlays' ? 'rb-scroll flex-1 overflow-y-auto px-2.5 py-2.5' : 'hidden'}
       >

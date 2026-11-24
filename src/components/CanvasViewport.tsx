@@ -71,6 +71,7 @@ interface CanvasViewportProps {
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
   overlayPacksById: ReadonlyMap<string, OverlayPack>;
+  imageCache?: TileImageCache;
   activeBrush: ActiveBrush | null;
   draggingBrush: ActiveBrush | null;
   selectedCoord: AxialCoord | null;
@@ -138,6 +139,7 @@ export function CanvasViewport({
   placements,
   tilesetsById,
   overlayPacksById,
+  imageCache,
   activeBrush,
   draggingBrush,
   selectedCoord,
@@ -183,10 +185,11 @@ export function CanvasViewport({
 }: CanvasViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imageCacheRef = useRef<TileImageCache | null>(null);
-  if (!imageCacheRef.current) {
-    imageCacheRef.current = new TileImageCache();
+  const fallbackImageCacheRef = useRef<TileImageCache | null>(null);
+  if (!imageCache && !fallbackImageCacheRef.current) {
+    fallbackImageCacheRef.current = new TileImageCache();
   }
+  const activeImageCache = imageCache ?? fallbackImageCacheRef.current!;
   const alphaCacheRef = useRef<AlphaMaskCache | null>(null);
   if (!alphaCacheRef.current) {
     alphaCacheRef.current = new AlphaMaskCache();
@@ -284,11 +287,10 @@ export function CanvasViewport({
   }, []);
 
   useEffect(() => {
-    const cache = imageCacheRef.current!;
-    return cache.subscribe(() => {
+    return activeImageCache.subscribe(() => {
       setRenderTick((t) => t + 1);
     });
-  }, []);
+  }, [activeImageCache]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -393,10 +395,10 @@ export function CanvasViewport({
     () =>
       createOverlayHitTestLookup(
         overlayPacksById,
-        imageCacheRef.current!,
+        activeImageCache,
         alphaCacheRef.current!,
       ),
-    [overlayPacksById],
+    [activeImageCache, overlayPacksById],
   );
 
   const activeRotationPreview: OverlayRotationPreview | null =
@@ -417,7 +419,7 @@ export function CanvasViewport({
     const { width, height } = resolveOverlayRenderWorldSize(
       match.overlay,
       overlayPacksById,
-      imageCacheRef.current!,
+      activeImageCache,
     );
     return {
       host: match.host,
@@ -426,6 +428,7 @@ export function CanvasViewport({
     };
   }, [
     activeBrush,
+    activeImageCache,
     activeRotationPreview,
     dragMove,
     focusedOverlayId,
@@ -462,7 +465,7 @@ export function CanvasViewport({
       placements: renderedPlacements,
       tilesetsById,
       overlayPacksById,
-      imageCache: imageCacheRef.current!,
+      imageCache: activeImageCache,
       showGrid,
       showLabels: viewMode === 'gm' && showLabels,
       hoveredCoord,
@@ -491,6 +494,7 @@ export function CanvasViewport({
     renderedPlacements,
     tilesetsById,
     overlayPacksById,
+    activeImageCache,
     showGrid,
     showLabels,
     viewMode,
@@ -595,6 +599,7 @@ export function CanvasViewport({
         ref={canvasRef}
         className={`block h-full w-full ${cursorClass}`}
         onPointerDown={(e) => {
+          const hadContextMenu = Boolean(contextMenu);
           if (contextMenu) {
             onContextMenuChange(null);
           }
@@ -640,7 +645,12 @@ export function CanvasViewport({
             return;
           }
 
-          if (e.button !== 0 || activeBrush) return;
+          if (e.button !== 0 || activeBrush) {
+            if (hadContextMenu && e.button === 0 && activeBrush) {
+              scheduleClickSuppressionClear();
+            }
+            return;
+          }
           const world = pointerToWorld(e.clientX, e.clientY);
           if (!world) return;
 

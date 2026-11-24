@@ -24,6 +24,8 @@ import {
   MISSING_OVERLAY_WIDTH,
   OVERLAY_WORLD_PER_PIXEL,
   clampWorldPointToHostHex,
+  computeFitCameraWithOverlays,
+  computeFitWorldBounds,
   computeOverlayWorldBounds,
   doesOverlayOverhangHostHex,
   getOverlayDialGeometry,
@@ -775,5 +777,132 @@ describe('World-space Assembly Callouts & collision solver (Seam 3)', () => {
 
     // Degenerate viewport -> null
     expect(computePanToFocusCamera(cam, 400, -120, 0, 0, 64)).toBeNull();
+  });
+
+  it('computes synchronous overhang-aware Fit bounds with 72x44 missing boxes, loading host fallback, and Player View Fog exclusion', () => {
+    expect(computeFitWorldBounds([])).toBeNull();
+    expect(computeFitCameraWithOverlays([], 1000, 800)).toEqual({ x: 0, y: 0, zoom: 1 });
+
+    // Host (0, 0) with a loaded overhanging bridge (600x240px = 100x40u) at right rim (x=100 -> maxX=150)
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          {
+            id: 'ov-loaded-bridge',
+            overlayPackId: 'mhd',
+            overlayId: 'bridge',
+            offsetX: 1,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+          {
+            // Rotated 90° vertical bridge (40x100u) near top -> y=-80, minY=-130
+            id: 'ov-rotated-bridge',
+            overlayPackId: 'mhd',
+            overlayId: 'bridge',
+            offsetX: 0,
+            offsetY: -0.8,
+            rotationDeg: 90,
+          },
+        ],
+      },
+      {
+        q: -2,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '03-04',
+        faceNumber: 3,
+        rotation: 0,
+        covered: false,
+        overlays: [
+          {
+            // Missing asset on uncovered host (-300, -sqrt3*100) at left rim (offsetX=-1 -> x=-400, 72x44 -> minX=-436)
+            id: 'ov-missing-rim',
+            overlayPackId: 'lost-pack',
+            overlayId: 'missing-prop',
+            offsetX: -1,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+          {
+            // Still-loading image at top rim of northernmost host -> must fall back to host hex (no 72x44 expansion!)
+            id: 'ov-loading-rim',
+            overlayPackId: 'mhd',
+            overlayId: 'pending-image',
+            offsetX: 0,
+            offsetY: -Math.sqrt(3) / 2,
+            rotationDeg: 0,
+          },
+        ],
+      },
+    ];
+
+    const getOverlayAssetState = (ov: { overlayId: string }) => {
+      if (ov.overlayId === 'bridge') return { status: 'loaded' as const, width: 600, height: 240 };
+      if (ov.overlayId === 'pending-image') return { status: 'loading' as const };
+      return { status: 'missing' as const };
+    };
+
+    // Host (-2, 0) center is (-300, -HEX_HEIGHT); bottom of hex is -HEX_HEIGHT + HEX_HEIGHT/2 = -0.5*HEX_HEIGHT.
+    // Host (0, 0) bottom of hex is +0.5*HEX_HEIGHT.
+    // In GM View: covered host (0, 0) overhangs ARE visible (maxX=150, minY=-130),
+    // uncovered (-2, 0) missing overhang IS visible (minX=-436), and loading overlay does NOT expand minY/maxY!
+    const gmBounds = computeFitWorldBounds(placements, {
+      viewMode: 'gm',
+      getOverlayAssetState,
+    })!;
+    expect(gmBounds.minX).toBeCloseTo(-436, 8);
+    expect(gmBounds.maxX).toBeCloseTo(150, 8);
+    expect(gmBounds.minY).toBeCloseTo(-1.5 * HEX_HEIGHT, 8); // host (-2, 0) top is -1.5*HEX_HEIGHT < -130
+    expect(gmBounds.maxY).toBeCloseTo(0.5 * HEX_HEIGHT, 8); // loading overlay did NOT expand past host (0,0) bottom
+
+    const gmCam = computeFitCameraWithOverlays(placements, 1000, 800, {
+      padding: 50,
+      viewMode: 'gm',
+      getOverlayAssetState,
+    });
+    expect(gmCam.x).toBeCloseTo((-436 + 150) / 2, 8);
+    expect(gmCam.y).toBeCloseTo((-1.5 * HEX_HEIGHT + 0.5 * HEX_HEIGHT) / 2, 8);
+    expect(gmCam.zoom).toBeCloseTo(Math.min(900 / 586, 700 / (2 * HEX_HEIGHT)), 6);
+
+    // In Player View: covered host (0, 0) overhangs are hidden -> maxX shrinks back to +100,
+    // while uncovered host (-2, 0) missing overhang stays included (minX=-436)!
+    const playerBounds = computeFitWorldBounds(placements, {
+      viewMode: 'player',
+      getOverlayAssetState,
+    })!;
+    expect(playerBounds.minX).toBeCloseTo(-436, 8);
+    expect(playerBounds.maxX).toBeCloseTo(HEX_RADIUS, 8);
+
+    // Single covered host with vertical overhang: GM Fit expands minY to -130, Player Fit stays at host hex -86.6
+    const singleCovered = [placements[0]];
+    const singleGm = computeFitWorldBounds(singleCovered, {
+      viewMode: 'gm',
+      getOverlayAssetState,
+    })!;
+    expect(singleGm.minY).toBeCloseTo(-130, 8);
+    expect(singleGm.maxX).toBeCloseTo(150, 8);
+
+    const singlePlayer = computeFitWorldBounds(singleCovered, {
+      viewMode: 'player',
+      getOverlayAssetState,
+    })!;
+    expect(singlePlayer.minY).toBeCloseTo(-0.5 * HEX_HEIGHT, 8);
+    expect(singlePlayer.maxX).toBeCloseTo(HEX_RADIUS, 8);
+
+    // Degenerate viewport returns DEFAULT_CAMERA
+    expect(
+      computeFitCameraWithOverlays(singleCovered, 0, 600, {
+        viewMode: 'gm',
+        getOverlayAssetState,
+      }),
+    ).toEqual({ x: 0, y: 0, zoom: 1 });
   });
 });

@@ -26,6 +26,7 @@ import {
   flipPlacement,
   formatActiveBrushLabel,
   formatAssemblyLabel,
+  formatClearMapDescription,
   formatMapSummaryCounts,
   formatPullListText,
   groupOverlaysByPrefix,
@@ -2079,5 +2080,263 @@ describe('Pull List v2: By Pack, By Tile, Missing Overlays, and Copy text (Seam 
     expect(cratePos).toBeGreaterThan(-1);
     expect(bridgePos).toBeGreaterThan(cratePos);
     expect(torchPos).toBeGreaterThan(bridgePos);
+  });
+});
+
+describe('No-op Undo suppression & GM selection reconciliation (Seam 2)', () => {
+  it('returns identical references and skips history on all no-op Tile, Overlay, and Fog mutations', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    let placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          {
+            id: 'ov-bottom',
+            overlayPackId: 'man-hewn-dungeons',
+            overlayId: 'crate',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+          {
+            id: 'ov-top',
+            overlayPackId: 'man-hewn-dungeons',
+            overlayId: 'torch',
+            offsetX: 0.25,
+            offsetY: -0.2,
+            rotationDeg: 45,
+          },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '37-37',
+        faceNumber: 37,
+        rotation: 2,
+      },
+    ];
+
+    let history = createHistory(placements);
+
+    const assertSkipped = (candidate: Placement[]) => {
+      expect(candidate).toBe(history.present);
+      const committed = commitWithFence(history, null, candidate);
+      expect(committed.history).toBe(history);
+      expect(committed.history.past).toHaveLength(0);
+    };
+
+    // 1. Tile no-ops: identical re-stamp, missing rotate/remove, symmetric flip, zero-delta move, empty clear
+    assertSkipped(
+      placeTile(history.present, {
+        q: 0,
+        r: 0,
+        tilesetId: 'man-hewn-dungeons',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+      }),
+    );
+    assertSkipped(rotatePlacement(history.present, { q: 9, r: 9 }, 1));
+    assertSkipped(flipPlacement(history.present, { q: 1, r: 0 }, [mhd]));
+    assertSkipped(flipPlacement(history.present, { q: 9, r: 9 }, [mhd]));
+    assertSkipped(moveOrSwapPlacement(history.present, { q: 0, r: 0 }, { q: 0, r: 0 }));
+    assertSkipped(moveOrSwapPlacement(history.present, { q: 9, r: 9 }, { q: 2, r: 0 }));
+    assertSkipped(removePlacement(history.present, { q: 9, r: 9 }));
+
+    const emptyPlacements: Placement[] = [];
+    expect(clearMap(emptyPlacements)).toBe(emptyPlacements);
+
+    // 2. Overlay no-ops: 0° at 0°, near-360° wraparound, Center at (0,0), stack bounds, zero-delta drag, empty attach
+    assertSkipped(setOverlayLocalRotation(history.present, { q: 0, r: 0 }, 'ov-bottom', 0));
+    assertSkipped(
+      setOverlayLocalRotation(history.present, { q: 0, r: 0 }, 'ov-bottom', 359.99999999),
+    );
+    assertSkipped(centerOverlayOnHost(history.present, { q: 0, r: 0 }, 'ov-bottom'));
+    assertSkipped(reorderOverlayZ(history.present, { q: 0, r: 0 }, 'ov-bottom', 'down'));
+    assertSkipped(reorderOverlayZ(history.present, { q: 0, r: 0 }, 'ov-top', 'up'));
+    assertSkipped(removeOverlay(history.present, { q: 0, r: 0 }, 'missing-ov'));
+
+    const attachEmpty = attachOverlayAtWorld(
+      history.present,
+      { q: 9, r: 9 },
+      { overlayPackId: 'man-hewn-dungeons', overlayId: 'crate' },
+      0,
+      0,
+    );
+    expect(attachEmpty.createdOverlay).toBeNull();
+    expect(attachEmpty.placements).toBe(history.present);
+
+    const centerWorld = axialToWorld(0, 0, HEX_RADIUS);
+    const noopDrag = moveOrReparentOverlay(
+      history.present,
+      { q: 0, r: 0 },
+      'ov-bottom',
+      { q: 0, r: 0 },
+      centerWorld.x,
+      centerWorld.y,
+    );
+    expect(noopDrag.changed).toBe(false);
+    expect(noopDrag.placements).toBe(history.present);
+
+    // 3. Fog no-ops: revealAll when none covered; coverAll when all covered
+    assertSkipped(revealAllPlacements(history.present));
+    assertSkipped(applyFogStroke(history.present, [{ q: 0, r: 0 }, { q: 1, r: 0 }], false));
+
+    const allCovered = coverAllPlacements(history.present);
+    history = commitHistory(history, allCovered);
+    expect(coverAllPlacements(history.present)).toBe(history.present);
+    expect(applyFogStroke(history.present, [{ q: 0, r: 0 }], true)).toBe(history.present);
+  });
+
+  it('reconciles GM selection across attach, reparent, host-swap, and host-delete Undo/Redo', () => {
+    const host0: Placement = {
+      q: 0,
+      r: 0,
+      tilesetId: 'mhd',
+      tileId: '01-02',
+      faceNumber: 1,
+      rotation: 0,
+    };
+    const host1: Placement = {
+      q: 1,
+      r: 0,
+      tilesetId: 'mhd',
+      tileId: '03-04',
+      faceNumber: 3,
+      rotation: 1,
+    };
+
+    // s0: two hosts
+    const s0 = placeTile(placeTile([], host0), host1);
+    let history = createHistory(s0);
+
+    // s1: attach ov-new onto host (0, 0)
+    const attached = attachOverlayAtWorld(
+      history.present,
+      { q: 0, r: 0 },
+      { overlayPackId: 'aw', overlayId: 'table' },
+      0,
+      0,
+      { id: 'ov-new' },
+    );
+    history = commitHistory(history, attached.placements);
+
+    // s2: reparent ov-new from (0, 0) to (1, 0)
+    const host1World = axialToWorld(1, 0, HEX_RADIUS);
+    const reparented = moveOrReparentOverlay(
+      history.present,
+      { q: 0, r: 0 },
+      'ov-new',
+      { q: 1, r: 0 },
+      host1World.x,
+      host1World.y,
+    );
+    history = commitHistory(history, reparented.placements);
+
+    // s3: delete host (1, 0) together with ov-new
+    const deletedHost = removePlacement(history.present, { q: 1, r: 0 });
+    history = commitHistory(history, deletedHost);
+
+    // Starting at s2 with (1, 0) + ov-new focused, undo to s1 follows ov-new back to (0, 0)
+    let sel = { selectedCoord: { q: 1, r: 0 } as { q: number; r: number } | null, focusedOverlayId: 'ov-new' as string | null };
+    history = undoHistory(history); // s3 -> s2
+    sel = reconcileSelectionAfterHistory(history.present, null, null);
+    expect(sel).toEqual({ selectedCoord: null, focusedOverlayId: null });
+
+    // From s2 focused on ov-new, undo reparent -> follows ov-new back to (0, 0)
+    sel = { selectedCoord: { q: 1, r: 0 }, focusedOverlayId: 'ov-new' };
+    history = undoHistory(history); // s2 -> s1
+    sel = reconcileSelectionAfterHistory(history.present, sel.selectedCoord, sel.focusedOverlayId);
+    expect(sel).toEqual({ selectedCoord: { q: 0, r: 0 }, focusedOverlayId: 'ov-new' });
+
+    // Undo attach -> clears focusedOverlayId while preserving host selectedCoord (0, 0)
+    history = undoHistory(history); // s1 -> s0
+    sel = reconcileSelectionAfterHistory(history.present, sel.selectedCoord, sel.focusedOverlayId);
+    expect(sel).toEqual({ selectedCoord: { q: 0, r: 0 }, focusedOverlayId: null });
+
+    // Redo attach & reparent: host-only selection stays on (0, 0) when ov-new isn't focused,
+    // and when ov-new IS focused before redo reparent, redo follows ov-new to (1, 0)
+    history = redoHistory(history); // s0 -> s1
+    sel = { selectedCoord: { q: 0, r: 0 }, focusedOverlayId: 'ov-new' };
+    history = redoHistory(history); // s1 -> s2
+    sel = reconcileSelectionAfterHistory(history.present, sel.selectedCoord, sel.focusedOverlayId);
+    expect(sel).toEqual({ selectedCoord: { q: 1, r: 0 }, focusedOverlayId: 'ov-new' });
+
+    // Redo host deletion -> clears both selectedCoord and focusedOverlayId
+    history = redoHistory(history); // s2 -> s3
+    sel = reconcileSelectionAfterHistory(history.present, sel.selectedCoord, sel.focusedOverlayId);
+    expect(sel).toEqual({ selectedCoord: null, focusedOverlayId: null });
+  });
+
+  it('formats dynamic Clear Map confirmation copy using GLOSSARY terms while omitting zero-count clauses', () => {
+    expect(formatClearMapDescription([])).toBe('The active Map is already empty.');
+
+    const singleTileOnly: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 },
+    ];
+    const singleCopy = formatClearMapDescription(singleTileOnly);
+    expect(singleCopy).toBe(
+      'This removes 1 Placement from the active Map. You can undo this action afterward with Cmd/Ctrl+Z.',
+    );
+    expect(singleCopy).not.toContain('Overlay Placement');
+    expect(singleCopy).not.toContain('Fog of War');
+
+    const withOverlaysNoFog: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          { id: 'ov-1', overlayPackId: 'aw', overlayId: 'orb', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-2', overlayPackId: 'aw', overlayId: 'orb', offsetX: 0.2, offsetY: 0, rotationDeg: 0 },
+        ],
+      },
+      { q: 1, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 0 },
+    ];
+    const overlaysCopy = formatClearMapDescription(withOverlaysNoFog);
+    expect(overlaysCopy).toBe(
+      'This removes 2 Placements and 2 Overlay Placements from the active Map. You can undo this action afterward with Cmd/Ctrl+Z.',
+    );
+    expect(overlaysCopy).not.toContain('Fog of War');
+
+    const withFogNoOverlays: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0, covered: true },
+      { q: 1, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 0 },
+    ];
+    const fogOnlyCopy = formatClearMapDescription(withFogNoOverlays);
+    expect(fogOnlyCopy).toBe(
+      'This removes 2 Placements from the active Map and clears Fog of War on 1 Placement. You can undo this action afterward with Cmd/Ctrl+Z.',
+    );
+    expect(fogOnlyCopy).not.toContain('Overlay Placement');
+
+    const allThree: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'mhd',
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          { id: 'ov-1', overlayPackId: 'aw', overlayId: 'orb', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+        ],
+      },
+      { q: 1, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 0, covered: true },
+      { q: 0, r: 1, tilesetId: 'mhd', tileId: '03-04', faceNumber: 4, rotation: 0 },
+    ];
+    expect(formatClearMapDescription(allThree)).toBe(
+      'This removes 3 Placements and 1 Overlay Placement from the active Map and clears Fog of War on 2 Placements. You can undo this action afterward with Cmd/Ctrl+Z.',
+    );
   });
 });

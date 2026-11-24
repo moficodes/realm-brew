@@ -5,6 +5,7 @@ import {
   clampOffsetToUnitHex,
   normalizeRotationDeg,
 } from './hexGeometry';
+import { countCoveredPlacements } from './fogOfWar';
 import {
   overlayLocalToWorld,
   reprojectOverlayToHost,
@@ -107,6 +108,18 @@ export function placeTile(placements: readonly Placement[], nextPlacement: Place
     return [...placements, { ...nextPlacement }];
   }
 
+  const sameTile =
+    existing.tilesetId === nextPlacement.tilesetId &&
+    existing.tileId === nextPlacement.tileId &&
+    existing.faceNumber === nextPlacement.faceNumber &&
+    existing.rotation === nextPlacement.rotation &&
+    (nextPlacement.covered === undefined ||
+      Boolean(nextPlacement.covered) === Boolean(existing.covered)) &&
+    nextPlacement.overlays === undefined;
+  if (sameTile) {
+    return placements as Placement[];
+  }
+
   const merged: Placement = { ...nextPlacement };
   if (merged.covered === undefined && existing.covered) {
     merged.covered = true;
@@ -165,7 +178,7 @@ export function attachOverlayAtWorld(
 ): AttachOverlayResult {
   const host = findPlacementAt(placements, hostCoord);
   if (!host) {
-    return { placements: [...placements], createdOverlay: null };
+    return { placements: placements as Placement[], createdOverlay: null };
   }
 
   const local = worldToClampedOverlayLocal(
@@ -331,7 +344,9 @@ export function setOverlayLocalRotation(
   if (!match) return placements as Placement[];
 
   const normalized = normalizeRotationDeg(localDeg);
-  if (Math.abs(match.overlay.rotationDeg - normalized) < 1e-6) {
+  const diff = Math.abs(match.overlay.rotationDeg - normalized);
+  const angularDiff = Math.min(diff, 360 - diff);
+  if (angularDiff < 1e-6) {
     return placements as Placement[];
   }
 
@@ -486,6 +501,9 @@ export function rotatePlacement(
   coord: AxialCoord,
   delta: 1 | -1,
 ): Placement[] {
+  if (!findPlacementAt(placements, coord)) {
+    return placements as Placement[];
+  }
   return placements.map((p) =>
     p.q === coord.q && p.r === coord.r
       ? { ...p, rotation: rotateStep(p.rotation, delta) }
@@ -537,11 +555,22 @@ export function flipPlacement(
   coord: AxialCoord,
   tilesets: readonly Tileset[],
 ): Placement[] {
-  return placements.map((p) => {
-    if (p.q !== coord.q || p.r !== coord.r) return p;
-    const nextFace = resolveFlippedFaceNumber(p.tilesetId, p.tileId, p.faceNumber, tilesets);
-    return nextFace === p.faceNumber ? p : { ...p, faceNumber: nextFace };
-  });
+  const existing = findPlacementAt(placements, coord);
+  if (!existing) {
+    return placements as Placement[];
+  }
+  const nextFace = resolveFlippedFaceNumber(
+    existing.tilesetId,
+    existing.tileId,
+    existing.faceNumber,
+    tilesets,
+  );
+  if (nextFace === existing.faceNumber) {
+    return placements as Placement[];
+  }
+  return placements.map((p) =>
+    p.q === coord.q && p.r === coord.r ? { ...p, faceNumber: nextFace } : p,
+  );
 }
 
 export function moveOrSwapPlacement(
@@ -550,10 +579,10 @@ export function moveOrSwapPlacement(
   toCoord: AxialCoord,
 ): Placement[] {
   if (fromCoord.q === toCoord.q && fromCoord.r === toCoord.r) {
-    return [...placements];
+    return placements as Placement[];
   }
   const source = findPlacementAt(placements, fromCoord);
-  if (!source) return [...placements];
+  if (!source) return placements as Placement[];
 
   const target = findPlacementAt(placements, toCoord);
   return placements.map((p) => {
@@ -571,10 +600,16 @@ export function removePlacement(
   placements: readonly Placement[],
   coord: AxialCoord,
 ): Placement[] {
+  if (!findPlacementAt(placements, coord)) {
+    return placements as Placement[];
+  }
   return placements.filter((p) => !(p.q === coord.q && p.r === coord.r));
 }
 
-export function clearMap(): Placement[] {
+export function clearMap(placements?: readonly Placement[]): Placement[] {
+  if (placements && placements.length === 0) {
+    return placements as Placement[];
+  }
   return [];
 }
 
@@ -793,6 +828,28 @@ export function formatMapSummaryCounts(placementCount: number, overlayCount: num
   }
   const overlayLabel = `${overlayCount} ${overlayCount === 1 ? 'Overlay' : 'Overlays'}`;
   return `${tileLabel} · ${overlayLabel}`;
+}
+
+/** Build Clear Map confirmation copy summarizing Placement, Overlay Placement, and Fog of War counts. */
+export function formatClearMapDescription(placements: readonly Placement[]): string {
+  const placementCount = placements.length;
+  if (placementCount === 0) {
+    return 'The active Map is already empty.';
+  }
+  const overlayCount = countMapOverlays(placements);
+  const coveredCount = countCoveredPlacements(placements);
+
+  const placementText = `${placementCount} ${placementCount === 1 ? 'Placement' : 'Placements'}`;
+  const overlayText =
+    overlayCount > 0
+      ? ` and ${overlayCount} ${overlayCount === 1 ? 'Overlay Placement' : 'Overlay Placements'}`
+      : '';
+  const fogText =
+    coveredCount > 0
+      ? ` and clears Fog of War on ${coveredCount} ${coveredCount === 1 ? 'Placement' : 'Placements'}`
+      : '';
+
+  return `This removes ${placementText}${overlayText} from the active Map${fogText}. You can undo this action afterward with Cmd/Ctrl+Z.`;
 }
 
 function validateOverlayPlacements(

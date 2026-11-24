@@ -21,6 +21,8 @@ const CHECKERBOARD_THUMB_STYLE = {
 interface PullListPanelProps {
   mapName: string;
   pullList: PullListSummary;
+  subView: PullListSubView;
+  onSubViewChange: (subView: PullListSubView) => void;
   onHoverHighlight: (highlight: PullListHighlight | null) => void;
   onFocusHost: (coord: AxialCoord) => void;
   onFocusOverlay: (hostCoord: AxialCoord, overlayId: string) => void;
@@ -29,11 +31,12 @@ interface PullListPanelProps {
 export function PullListPanel({
   mapName,
   pullList,
+  subView,
+  onSubViewChange,
   onHoverHighlight,
   onFocusHost,
   onFocusOverlay,
 }: PullListPanelProps) {
-  const [subView, setSubView] = useState<PullListSubView>('by-pack');
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
 
   const handleCopy = async () => {
@@ -94,7 +97,7 @@ export function PullListPanel({
             aria-pressed={subView === 'by-pack'}
             onClick={() => {
               onHoverHighlight(null);
-              setSubView('by-pack');
+              onSubViewChange('by-pack');
             }}
             className={`rounded-md px-2 py-1 text-xs font-semibold transition ${
               subView === 'by-pack'
@@ -109,7 +112,7 @@ export function PullListPanel({
             aria-pressed={subView === 'by-tile'}
             onClick={() => {
               onHoverHighlight(null);
-              setSubView('by-tile');
+              onSubViewChange('by-tile');
             }}
             className={`rounded-md px-2 py-1 text-xs font-semibold transition ${
               subView === 'by-tile'

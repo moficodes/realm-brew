@@ -9,24 +9,27 @@ const NON_TEXT_INPUT_TYPES = new Set([
 ]);
 
 export function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.tagName === 'INPUT') {
-    const inputType = (target as HTMLInputElement).type?.toLowerCase() ?? 'text';
+  if (!(target instanceof Element)) return false;
+  const tag = target.tagName.toUpperCase();
+  if (tag === 'INPUT') {
+    const inputType = (target as HTMLInputElement).type?.toLowerCase() || 'text';
     return !NON_TEXT_INPUT_TYPES.has(inputType);
   }
   return (
-    target.tagName === 'TEXTAREA' ||
-    target.tagName === 'SELECT' ||
-    target.isContentEditable
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    (target instanceof HTMLElement && target.isContentEditable)
   );
 }
 
 /** Return true when Space should activate a focused interactive control instead of panning. */
 export function shouldYieldSpacePan(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
+  if (!(target instanceof Element)) return false;
   if (isEditableTarget(target)) return true;
   return Boolean(
-    target.closest('button, a[href], input, select, textarea, [role="button"], [role="tab"]'),
+    target.closest(
+      'button, a, summary, input:not([type="range"]), select, textarea, [role="button"], [role="tab"], [role="menuitem"], [role="checkbox"], [role="radio"], [role="switch"]',
+    ),
   );
 }
 

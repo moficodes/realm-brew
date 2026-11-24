@@ -1,11 +1,17 @@
+import type { MapViewMode } from './fogOfWar';
 import {
+  DEFAULT_CAMERA,
   HEX_RADIUS,
   HEX_WIDTH,
   axialToWorld,
   clampOffsetToUnitHex,
+  clampZoom,
+  computePlacementsWorldBounds,
   normalizeRotationDeg,
   rotationToRadians,
+  type Camera,
   type Point2D,
+  type WorldBounds,
 } from './hexGeometry';
 import type { AxialCoord, OverlayPlacement, Placement } from './types';
 
@@ -386,4 +392,90 @@ export function doesOverlayOverhangHostHex(
   const t = overlayLocalToWorld(host, overlay, radius);
   const { width, height } = getOverlayWorldSize(pixelSize);
   return doesOverlayBoxOverhangHostHex(t.x, t.y, width, height, t.worldRad, host, radius);
+}
+
+export type OverlayFitAssetState =
+  | { status: 'loaded'; width: number; height: number }
+  | { status: 'missing' }
+  | { status: 'loading' };
+
+export interface FitWorldBoundsOptions {
+  viewMode?: MapViewMode;
+  getOverlayAssetState?: (overlay: OverlayPlacement) => OverlayFitAssetState;
+  radius?: number;
+}
+
+/**
+ * Synchronously compute Map world bounds for Fit framing by unioning host hexes with
+ * rotated world boxes of visible loaded Overlays (72x44 for missing, host hex fallback
+ * for still-loading images, and excluding Overlays on covered hosts in Player View).
+ */
+export function computeFitWorldBounds(
+  placements: readonly Placement[],
+  options?: FitWorldBoundsOptions,
+): WorldBounds | null {
+  const radius = options?.radius ?? HEX_RADIUS;
+  const baseBounds = computePlacementsWorldBounds(placements, radius);
+  if (!baseBounds) return null;
+
+  const viewMode = options?.viewMode ?? 'gm';
+  const getOverlayAssetState = options?.getOverlayAssetState;
+  let { minX, minY, maxX, maxY } = baseBounds;
+
+  for (const host of placements) {
+    if (viewMode === 'player' && host.covered) {
+      continue;
+    }
+    for (const ov of host.overlays ?? []) {
+      const state = getOverlayAssetState?.(ov) ?? { status: 'loading' as const };
+      if (state.status === 'loading') {
+        continue;
+      }
+      const dims =
+        state.status === 'loaded'
+          ? getOverlayWorldSize({ width: state.width, height: state.height })
+          : getOverlayWorldSize(null);
+      const t = overlayLocalToWorld(host, ov, radius);
+      const ovBounds = computeOverlayWorldBounds(t.x, t.y, dims.width, dims.height, t.worldRad);
+      if (ovBounds.minX < minX) minX = ovBounds.minX;
+      if (ovBounds.minY < minY) minY = ovBounds.minY;
+      if (ovBounds.maxX > maxX) maxX = ovBounds.maxX;
+      if (ovBounds.maxY > maxY) maxY = ovBounds.maxY;
+    }
+  }
+
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY,
+    centerX: (minX + maxX) / 2,
+    centerY: (minY + maxY) / 2,
+  };
+}
+
+/** Compute overhang-aware and Player-View-filtered Fit camera synchronously. */
+export function computeFitCameraWithOverlays(
+  placements: readonly Placement[],
+  viewportWidth: number,
+  viewportHeight: number,
+  options?: FitWorldBoundsOptions & { padding?: number },
+): Camera {
+  const bounds = computeFitWorldBounds(placements, options);
+  if (!bounds || viewportWidth <= 0 || viewportHeight <= 0) {
+    return { ...DEFAULT_CAMERA };
+  }
+
+  const padding = options?.padding ?? 48;
+  const availW = Math.max(1, viewportWidth - padding * 2);
+  const availH = Math.max(1, viewportHeight - padding * 2);
+  const fitZoom = Math.min(availW / bounds.width, availH / bounds.height);
+
+  return {
+    x: bounds.centerX,
+    y: bounds.centerY,
+    zoom: clampZoom(fitZoom),
+  };
 }

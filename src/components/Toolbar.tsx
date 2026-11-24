@@ -199,7 +199,7 @@ export function Toolbar({
       <button
         type="button"
         onClick={onFitToContent}
-        title="Fit Map to viewport"
+        title="Fit Map to viewport (0)"
         className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1.5 text-xs font-medium text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100"
       >
         <Maximize2 className="h-3.5 w-3.5" />
@@ -210,6 +210,7 @@ export function Toolbar({
         type="button"
         onClick={onToggleGrid}
         aria-pressed={showGrid}
+        title="Toggle hex grid (G)"
         className={`flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
           showGrid
             ? 'border-amber-500/40 bg-amber-500/15 text-amber-200'
@@ -320,7 +321,7 @@ export function Toolbar({
             type="button"
             onClick={onRedo}
             disabled={!canRedo}
-            title="Redo (Cmd/Ctrl+Shift+Z)"
+            title="Redo (Cmd/Ctrl+Shift+Z / Ctrl+Y)"
             aria-label="Redo"
             className="border-l border-[#2e2a26] px-2 py-1.5 text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -334,7 +335,7 @@ export function Toolbar({
           type="button"
           onClick={onToggleLabels}
           aria-pressed={showLabels}
-          title="Toggle Tile number & orientation labels on Map"
+          title="Toggle Tile & Overlay assembly labels (L)"
           className={`flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors ${
             showLabels
               ? 'border-amber-500/40 bg-amber-500/15 text-amber-200'

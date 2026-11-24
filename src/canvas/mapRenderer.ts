@@ -25,6 +25,7 @@ import {
   getOverlayDialGeometry,
   getOverlayWorldSize,
   overlayLocalToWorld,
+  type OverlayFitAssetState,
   type OverlayHit,
 } from '../domain/overlayGeometry';
 import {
@@ -51,6 +52,7 @@ export const MAP_CANVAS_BG = '#221f1c';
 export interface ImageLookup {
   get: (url: string) => HTMLImageElement | null;
   isError: (url: string) => boolean;
+  peek?: (url: string) => HTMLImageElement | null;
 }
 
 export interface DragMovePreview {
@@ -472,6 +474,26 @@ export function resolveOverlayRenderWorldSize(
     return getOverlayWorldSize(null);
   }
   return getOverlayWorldSize({ width: img.naturalWidth, height: img.naturalHeight });
+}
+
+/** Synchronously resolve an Overlay Placement's load/missing/loaded state for Fit camera framing. */
+export function resolveOverlayFitAssetState(
+  overlay: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'>,
+  overlayPacksById: ReadonlyMap<string, OverlayPack>,
+  imageCache: ImageLookup,
+): OverlayFitAssetState {
+  const asset = resolveOverlayAsset(overlay, overlayPacksById);
+  if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
+    return { status: 'missing' };
+  }
+  const img = imageCache.peek ? imageCache.peek(asset.url) : imageCache.get(asset.url);
+  if (!img) {
+    return { status: 'loading' };
+  }
+  if (img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+    return { status: 'missing' };
+  }
+  return { status: 'loaded', width: img.naturalWidth, height: img.naturalHeight };
 }
 
 /** Pass 3: Render all Overlay Placements globally above all Tiles in deterministic host/stack order. */

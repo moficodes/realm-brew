@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, ClipboardList, Layers } from 'lucide-react';
 import type { PullListHighlight, PullListSummary } from '../domain/plannerEngine';
 import type { AxialCoord, OverlayPack, Placement, Tileset } from '../domain/types';
 import { HostInspectorPanel } from './HostInspectorPanel';
-import { PullListPanel } from './PullListPanel';
+import { PullListPanel, type PullListSubView } from './PullListPanel';
 
 export type RightDrawerTab = 'inspector' | 'pull-list';
 
@@ -10,6 +10,8 @@ interface RightDrawerProps {
   collapsed: boolean;
   activeTab: RightDrawerTab;
   onTabChange: (tab: RightDrawerTab) => void;
+  pullListSubView: PullListSubView;
+  onPullListSubViewChange: (subView: PullListSubView) => void;
   onToggleCollapse: () => void;
   onExpandToInspector: () => void;
   mapName: string;
@@ -43,6 +45,8 @@ export function RightDrawer({
   collapsed,
   activeTab,
   onTabChange,
+  pullListSubView,
+  onPullListSubViewChange,
   onToggleCollapse,
   onExpandToInspector,
   mapName,
@@ -190,6 +194,8 @@ export function RightDrawer({
         <PullListPanel
           mapName={mapName}
           pullList={pullList}
+          subView={pullListSubView}
+          onSubViewChange={onPullListSubViewChange}
           onHoverHighlight={onHoverPullListHighlight}
           onFocusHost={onFocusPullListHost}
           onFocusOverlay={onFocusPullListOverlay}

@@ -10,12 +10,15 @@ import {
   saveCollection,
   saveMap,
 } from './api/client';
+import { TileImageCache } from './canvas/imageCache';
+import { resolveOverlayFitAssetState } from './canvas/mapRenderer';
 import { exportMapAsPng } from './canvas/pngExporter';
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog, type CollectionPackKind } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import type { OverlayContextMenuState } from './components/OverlayContextMenu';
 import { PngExportDialog } from './components/PngExportDialog';
+import type { PullListSubView } from './components/PullListPanel';
 import { RightDrawer, type RightDrawerTab } from './components/RightDrawer';
 import { TilePalette, type PaletteTab } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
@@ -24,12 +27,14 @@ import {
   HEX_RADIUS,
   axialToWorld,
   clampZoom,
-  computeFitCamera,
   computePanToFocusCamera,
   normalizeRotationDeg,
   type Camera,
 } from './domain/hexGeometry';
-import { overlayLocalToWorld } from './domain/overlayGeometry';
+import {
+  computeFitCameraWithOverlays,
+  overlayLocalToWorld,
+} from './domain/overlayGeometry';
 import {
   applyFogStroke,
   attachOverlayAtWorld,
@@ -50,6 +55,7 @@ import {
   findPlacementAt,
   flipBrush,
   flipPlacement,
+  formatClearMapDescription,
   moveOrReparentOverlay,
   moveOrSwapPlacement,
   placeTile,
@@ -112,6 +118,7 @@ export function App() {
   const [showLabels, setShowLabels] = useState(false);
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
   const [rightDrawerTab, setRightDrawerTab] = useState<RightDrawerTab>('inspector');
+  const [pullListSubView, setPullListSubView] = useState<PullListSubView>('by-pack');
   const [activeBrush, setActiveBrush] = useState<ActiveBrush | null>(null);
   const [draggingBrush, setDraggingBrush] = useState<ActiveBrush | null>(null);
   const [selectedCoord, setSelectedCoord] = useState<AxialCoord | null>(null);
@@ -164,7 +171,9 @@ export function App() {
   const viewportSizeRef = useRef(viewportSize);
   viewportSizeRef.current = viewportSize;
   const panAnimFrameRef = useRef<number | null>(null);
+  const paletteScrollPositionsRef = useRef({ tiles: 0, overlays: 0 });
   const collectionSaveSeqRef = useRef(0);
+  const imageCache = useMemo(() => new TileImageCache(), []);
 
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<{ id: string; name: string; placements: Placement[] } | null>(null);
@@ -272,6 +281,8 @@ export function App() {
     }
     return map;
   }, [overlayPacks]);
+  const overlayPacksByIdRef = useRef(overlayPacksById);
+  overlayPacksByIdRef.current = overlayPacksById;
 
   const collectionUsage = useMemo(
     () => computeCollectionUsage(placements, tilesets, collection, overlayPacks),
@@ -332,6 +343,13 @@ export function App() {
     [scheduleAutoSave],
   );
 
+  const cancelSmoothPan = useCallback(() => {
+    if (panAnimFrameRef.current !== null) {
+      window.cancelAnimationFrame(panAnimFrameRef.current);
+      panAnimFrameRef.current = null;
+    }
+  }, []);
+
   const loadMapIntoEditor = useCallback(
     (doc: MapDocument) => {
       const nextHistory = createHistory(doc.placements);
@@ -340,9 +358,15 @@ export function App() {
       viewModeRef.current = 'gm';
       playerViewFenceRef.current = null;
       fogToolActiveRef.current = false;
+      activeBrushRef.current = null;
+      selectedCoordRef.current = null;
+      focusedOverlayIdRef.current = null;
+      contextMenuRef.current = null;
       setViewMode('gm');
       setPlayerViewFence(null);
       setFogToolActive(false);
+      setActiveBrush(null);
+      setDraggingBrush(null);
       setActiveMap(doc);
       setHistory(nextHistory);
       setSelectedCoord(null);
@@ -352,17 +376,20 @@ export function App() {
       setInspectorRotationPreview(null);
       setContextMenu(null);
       setSaveStatus('saved');
-      if (panAnimFrameRef.current !== null) {
-        window.cancelAnimationFrame(panAnimFrameRef.current);
-        panAnimFrameRef.current = null;
-      }
+      cancelSmoothPan();
+      const size = viewportSizeRef.current;
       setCamera(
         doc.placements.length > 0
-          ? computeFitCamera(doc.placements, viewportSize.width, viewportSize.height, 56)
+          ? computeFitCameraWithOverlays(doc.placements, size.width, size.height, {
+              padding: 56,
+              viewMode: 'gm',
+              getOverlayAssetState: (ov) =>
+                resolveOverlayFitAssetState(ov, overlayPacksByIdRef.current, imageCache),
+            })
           : DEFAULT_CAMERA,
       );
     },
-    [viewportSize.height, viewportSize.width],
+    [cancelSmoothPan, imageCache],
   );
 
   const handleSelectMap = useCallback(
@@ -697,12 +724,7 @@ export function App() {
 
   const handleFlipHost = useCallback(
     (coord: AxialCoord) => {
-      commitPlacements((prev) => {
-        const beforeFace = findPlacementAt(prev, coord)?.faceNumber;
-        const next = flipPlacement(prev, coord, tilesets);
-        const afterFace = findPlacementAt(next, coord)?.faceNumber;
-        return beforeFace === afterFace ? prev : next;
-      });
+      commitPlacements((prev) => flipPlacement(prev, coord, tilesets));
     },
     [commitPlacements, tilesets],
   );
@@ -791,6 +813,10 @@ export function App() {
       const next = !prev;
       fogToolActiveRef.current = next;
       if (next) {
+        activeBrushRef.current = null;
+        selectedCoordRef.current = null;
+        focusedOverlayIdRef.current = null;
+        contextMenuRef.current = null;
         setActiveBrush(null);
         setSelectedCoord(null);
         setFocusedOverlayId(null);
@@ -810,6 +836,10 @@ export function App() {
       playerViewFenceRef.current = fence;
       setPlayerViewFence(fence);
       fogToolActiveRef.current = false;
+      activeBrushRef.current = null;
+      selectedCoordRef.current = null;
+      focusedOverlayIdRef.current = null;
+      contextMenuRef.current = null;
       setFogToolActive(false);
       setActiveBrush(null);
       setDraggingBrush(null);
@@ -838,60 +868,54 @@ export function App() {
     setViewMode('gm');
   }, []);
 
+  const applyHistoryTransition = useCallback(
+    (res: { history: HistoryState<Placement[]>; fence: PlayerViewFence | null; changed: boolean }) => {
+      if (!res.changed) return;
+      historyRef.current = res.history;
+      setHistory(res.history);
+      playerViewFenceRef.current = res.fence;
+      setPlayerViewFence(res.fence);
+      contextMenuRef.current = null;
+      setContextMenu(null);
+      setInspectorRotationPreview(null);
+
+      if (viewModeRef.current === 'gm') {
+        const reconciled = reconcileSelectionAfterHistory(
+          res.history.present,
+          selectedCoordRef.current,
+          focusedOverlayIdRef.current,
+        );
+        selectedCoordRef.current = reconciled.selectedCoord;
+        focusedOverlayIdRef.current = reconciled.focusedOverlayId;
+        setSelectedCoord(reconciled.selectedCoord);
+        setFocusedOverlayId(reconciled.focusedOverlayId);
+        setHoveredInspectorOverlayId((cur) =>
+          cur && findOverlayById(res.history.present, cur) ? cur : null,
+        );
+      }
+
+      const currentMap = activeMapRef.current;
+      if (currentMap) {
+        scheduleAutoSave(currentMap.id, currentMap.name, res.history.present);
+      }
+    },
+    [scheduleAutoSave],
+  );
+
   const handleUndo = useCallback(() => {
-    const res = undoWithFence(historyRef.current, playerViewFenceRef.current);
-    if (!res.changed) return;
-    historyRef.current = res.history;
-    setHistory(res.history);
-    playerViewFenceRef.current = res.fence;
-    setPlayerViewFence(res.fence);
-    setContextMenu(null);
-    setInspectorRotationPreview(null);
-
-    if (viewModeRef.current === 'gm') {
-      const reconciled = reconcileSelectionAfterHistory(
-        res.history.present,
-        selectedCoordRef.current,
-        focusedOverlayIdRef.current,
-      );
-      setSelectedCoord(reconciled.selectedCoord);
-      setFocusedOverlayId(reconciled.focusedOverlayId);
-    }
-
-    const currentMap = activeMapRef.current;
-    if (currentMap) {
-      scheduleAutoSave(currentMap.id, currentMap.name, res.history.present);
-    }
-  }, [scheduleAutoSave]);
+    applyHistoryTransition(undoWithFence(historyRef.current, playerViewFenceRef.current));
+  }, [applyHistoryTransition]);
 
   const handleRedo = useCallback(() => {
-    const res = redoWithFence(historyRef.current, playerViewFenceRef.current);
-    if (!res.changed) return;
-    historyRef.current = res.history;
-    setHistory(res.history);
-    playerViewFenceRef.current = res.fence;
-    setPlayerViewFence(res.fence);
-    setContextMenu(null);
-    setInspectorRotationPreview(null);
-
-    if (viewModeRef.current === 'gm') {
-      const reconciled = reconcileSelectionAfterHistory(
-        res.history.present,
-        selectedCoordRef.current,
-        focusedOverlayIdRef.current,
-      );
-      setSelectedCoord(reconciled.selectedCoord);
-      setFocusedOverlayId(reconciled.focusedOverlayId);
-    }
-
-    const currentMap = activeMapRef.current;
-    if (currentMap) {
-      scheduleAutoSave(currentMap.id, currentMap.name, res.history.present);
-    }
-  }, [scheduleAutoSave]);
+    applyHistoryTransition(redoWithFence(historyRef.current, playerViewFenceRef.current));
+  }, [applyHistoryTransition]);
 
   const handleConfirmClearMap = useCallback(() => {
-    commitPlacements(() => clearMap());
+    commitPlacements((prev) => clearMap(prev));
+    selectedCoordRef.current = null;
+    focusedOverlayIdRef.current = null;
+    contextMenuRef.current = null;
+    fogToolActiveRef.current = false;
     setSelectedCoord(null);
     setFocusedOverlayId(null);
     setHoveredInspectorOverlayId(null);
@@ -903,12 +927,40 @@ export function App() {
   }, [commitPlacements]);
 
   useEffect(() => {
+    if (!contextMenu) return;
+    const onPointerDown = () => {
+      setContextMenu(null);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [contextMenu]);
+
+  const handleFitToContent = useCallback(() => {
+    cancelSmoothPan();
+    const currentPlacements = historyRef.current.present;
+    const size = viewportSizeRef.current;
+    const mode = viewModeRef.current;
+    setCamera(
+      currentPlacements.length > 0
+        ? computeFitCameraWithOverlays(currentPlacements, size.width, size.height, {
+            padding: 56,
+            viewMode: mode,
+            getOverlayAssetState: (ov) =>
+              resolveOverlayFitAssetState(ov, overlayPacksByIdRef.current, imageCache),
+          })
+        : DEFAULT_CAMERA,
+    );
+  }, [cancelSmoothPan, imageCache]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (document.querySelector('dialog[open]') || isEditableTarget(event.target)) {
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+      const lowerKey = event.key.toLowerCase();
+
+      if (!event.altKey && (event.metaKey || event.ctrlKey) && lowerKey === 'z') {
         event.preventDefault();
         if (event.shiftKey) {
           handleRedo();
@@ -918,7 +970,32 @@ export function App() {
         return;
       }
 
-      // In Player View all editing shortcuts, drawers, and Esc are disabled
+      if (
+        event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        lowerKey === 'y'
+      ) {
+        event.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+        if (lowerKey === 'g') {
+          event.preventDefault();
+          setShowGrid((g) => !g);
+          return;
+        }
+        if (event.key === '0') {
+          event.preventDefault();
+          handleFitToContent();
+          return;
+        }
+      }
+
+      // In Player View all editing shortcuts, Labels, drawers, and Esc are disabled
       if (viewModeRef.current === 'player') {
         return;
       }
@@ -939,6 +1016,11 @@ export function App() {
       }
 
       if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (!event.shiftKey && lowerKey === 'l') {
+          event.preventDefault();
+          setShowLabels((l) => !l);
+          return;
+        }
         if (event.key === '[') {
           event.preventDefault();
           setPaletteCollapsed((c) => !c);
@@ -952,12 +1034,12 @@ export function App() {
         if (fogToolActiveRef.current) {
           return;
         }
-        if (event.key.toLowerCase() === 'r') {
+        if (lowerKey === 'r') {
           event.preventDefault();
           handleRotateAction(event.shiftKey ? -1 : 1);
           return;
         }
-        if (event.key.toLowerCase() === 'f') {
+        if (!event.shiftKey && lowerKey === 'f') {
           event.preventDefault();
           handleFlipAction();
           return;
@@ -982,7 +1064,15 @@ export function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleFlipAction, handleRedo, handleRemoveAt, handleRemoveOverlay, handleRotateAction, handleUndo]);
+  }, [
+    handleFitToContent,
+    handleFlipAction,
+    handleRedo,
+    handleRemoveAt,
+    handleRemoveOverlay,
+    handleRotateAction,
+    handleUndo,
+  ]);
 
   const handleChangeCopies = (kind: CollectionPackKind, id: string, copies: number) => {
     const prev = collectionRef.current;
@@ -1006,13 +1096,6 @@ export function App() {
         }
       });
   };
-
-  const cancelSmoothPan = useCallback(() => {
-    if (panAnimFrameRef.current !== null) {
-      window.cancelAnimationFrame(panAnimFrameRef.current);
-      panAnimFrameRef.current = null;
-    }
-  }, []);
 
   const handleCameraChange = useCallback(
     (next: Camera | ((prev: Camera) => Camera)) => {
@@ -1092,13 +1175,9 @@ export function App() {
   );
 
   const handleViewportSizeChange = useCallback((nextSize: { width: number; height: number }) => {
+    viewportSizeRef.current = nextSize;
     setViewportSize(nextSize);
   }, []);
-
-  const handleFitToContent = () => {
-    cancelSmoothPan();
-    setCamera(computeFitCamera(placements, viewportSize.width, viewportSize.height, 56));
-  };
 
   const handleTogglePullListFromToolbar = useCallback(() => {
     if (rightDrawerCollapsed || rightDrawerTab !== 'pull-list') {
@@ -1217,6 +1296,7 @@ export function App() {
             onDragBrushEnd={() => setDraggingBrush(null)}
             collapsed={paletteCollapsed}
             onToggleCollapse={() => setPaletteCollapsed((c) => !c)}
+            scrollPositionsRef={paletteScrollPositionsRef}
             bundleError={bundleError}
           />
         )}
@@ -1225,6 +1305,7 @@ export function App() {
           placements={placements}
           tilesetsById={tilesetsById}
           overlayPacksById={overlayPacksById}
+          imageCache={imageCache}
           activeBrush={activeBrush}
           draggingBrush={draggingBrush}
           selectedCoord={selectedCoord}
@@ -1274,6 +1355,8 @@ export function App() {
             collapsed={rightDrawerCollapsed}
             activeTab={rightDrawerTab}
             onTabChange={setRightDrawerTab}
+            pullListSubView={pullListSubView}
+            onPullListSubViewChange={setPullListSubView}
             onToggleCollapse={() => setRightDrawerCollapsed((c) => !c)}
             onExpandToInspector={handleExpandInspector}
             mapName={activeMap?.name ?? 'Untitled Map'}
@@ -1332,7 +1415,7 @@ export function App() {
       <ConfirmDialog
         open={clearConfirmOpen}
         title="Clear entire Map?"
-        description="This removes all Placements from the active Map. You can undo this action afterward with Cmd/Ctrl+Z."
+        description={formatClearMapDescription(placements)}
         confirmLabel="Clear Map"
         onConfirm={handleConfirmClearMap}
         onCancel={() => setClearConfirmOpen(false)}

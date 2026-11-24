@@ -21,6 +21,11 @@ export class TileImageCache {
     return this.images.get(url) === 'error';
   }
 
+  peek(url: string): HTMLImageElement | null {
+    const entry = this.images.get(url);
+    return entry instanceof HTMLImageElement ? entry : null;
+  }
+
   get(url: string): HTMLImageElement | null {
     const entry = this.images.get(url);
     if (entry instanceof HTMLImageElement) {
