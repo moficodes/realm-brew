@@ -2,6 +2,7 @@ import type { MapViewMode } from '../domain/fogOfWar';
 import {
   OVERLAY_CALLOUT_HEIGHT,
   layoutAssemblyCallouts,
+  type AssemblyCalloutLayout,
 } from '../domain/calloutLayout';
 import {
   HEX_HEIGHT,
@@ -463,15 +464,7 @@ export function resolveOverlayRenderWorldSize(
   overlayPacksById: ReadonlyMap<string, OverlayPack>,
   imageCache: ImageLookup,
 ): { width: number; height: number } {
-  const asset = resolveOverlayAsset(overlay, overlayPacksById);
-  if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
-    return getOverlayWorldSize(null);
-  }
-  const img = imageCache.get(asset.url);
-  if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
-    return getOverlayWorldSize(null);
-  }
-  return getOverlayWorldSize({ width: img.naturalWidth, height: img.naturalHeight });
+  return getOverlayWorldSize(getLoadedOverlayPixelSize(overlay, overlayPacksById, imageCache));
 }
 
 /** Pass 3: Render all Overlay Placements globally above all Tiles in deterministic host/stack order. */
@@ -839,8 +832,7 @@ function drawPullListHighlightPass(params: {
   }
 }
 
-/** Pass 5: Render deterministic Tile + Overlay world-space Assembly Callouts and overhang tethers. */
-export function drawAssemblyCalloutsPass(params: {
+export interface CanvasCalloutLayoutParams {
   ctx: CanvasRenderingContext2D;
   placements: readonly Placement[];
   tilesetsById: ReadonlyMap<string, Tileset>;
@@ -851,7 +843,29 @@ export function drawAssemblyCalloutsPass(params: {
   skipHostCoord?: AxialCoord | null;
   skipOverlayId?: string | null;
   hiddenHostCoords?: ReadonlySet<PlacementKey>;
-}): void {
+}
+
+/** Return loaded Overlay pixel dimensions, or null when missing/failed/loading. */
+export function getLoadedOverlayPixelSize(
+  overlay: Pick<OverlayPlacement, 'overlayPackId' | 'overlayId'>,
+  overlayPacksById: ReadonlyMap<string, OverlayPack>,
+  imageCache: ImageLookup,
+): { width: number; height: number } | null {
+  const asset = resolveOverlayAsset(overlay, overlayPacksById);
+  if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
+    return null;
+  }
+  const img = imageCache.get(asset.url);
+  if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+    return null;
+  }
+  return { width: img.naturalWidth, height: img.naturalHeight };
+}
+
+/** Measure and compute world-space Assembly Callouts using Canvas 2D text metrics. */
+export function computeCanvasAssemblyCalloutLayout(
+  params: CanvasCalloutLayoutParams,
+): AssemblyCalloutLayout {
   const {
     ctx,
     placements,
@@ -870,30 +884,26 @@ export function drawAssemblyCalloutsPass(params: {
     return ctx.measureText(text).width;
   };
 
-  const getOverlayPixelSize = (ov: OverlayPlacement) => {
-    const asset = resolveOverlayAsset(ov, overlayPacksById);
-    if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
-      return null;
-    }
-    const img = imageCache.get(asset.url);
-    if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
-      return null;
-    }
-    return { width: img.naturalWidth, height: img.naturalHeight };
-  };
-
-  const layout = layoutAssemblyCallouts({
+  return layoutAssemblyCallouts({
     placements,
     tilesetsById,
     overlayPacksById,
     overBudgetCoords,
     overBudgetOverlayIds,
-    getOverlayPixelSize,
+    getOverlayPixelSize: (ov) => getLoadedOverlayPixelSize(ov, overlayPacksById, imageCache),
     skipHostCoord,
     skipOverlayId,
     hiddenHostCoords,
     measureText,
   });
+}
+
+/** Pass 5: Render deterministic Tile + Overlay world-space Assembly Callouts and overhang tethers. */
+export function drawAssemblyCalloutsPass(
+  params: CanvasCalloutLayoutParams & { layout?: AssemblyCalloutLayout },
+): void {
+  const { ctx } = params;
+  const layout = params.layout ?? computeCanvasAssemblyCalloutLayout(params);
 
   // 5a: Subtle amber dashed host tethers only for overhanging Overlays
   for (const ov of layout.overlayCallouts) {
