@@ -26,6 +26,33 @@ import {
 } from './types';
 
 export { DEFAULT_OVERLAY_PACK_COPIES, DEFAULT_TILESET_COPIES };
+export {
+  commitHistory,
+  createHistory,
+  redoHistory,
+  undoHistory,
+  type HistoryState,
+} from './history';
+export {
+  applyFogStroke,
+  canRedoWithFence,
+  canUndoWithFence,
+  commitWithFence,
+  countCoveredPlacements,
+  coverAllPlacements,
+  enterPlayerViewSession,
+  FOG_FALLBACK_FILL,
+  FOG_TILE_FACE_NUMBER,
+  isPlacementCovered,
+  redoWithFence,
+  resolveFogTileFaceUrl,
+  revealAllPlacements,
+  setPlacementCovered,
+  togglePlacementFog,
+  undoWithFence,
+  type MapViewMode,
+  type PlayerViewFence,
+} from './fogOfWar';
 
 export interface TileAvailability {
   tilesetId: string;
@@ -50,12 +77,6 @@ export interface CollectionUsage {
   overBudgetCoords: Set<PlacementKey>;
   byOverlayKey: Map<string, OverlayAvailability>;
   overBudgetOverlayIds: Set<string>;
-}
-
-export interface HistoryState<T> {
-  past: T[];
-  present: T;
-  future: T[];
 }
 
 export function tileCollectionKey(tilesetId: string, tileId: string): string {
@@ -549,38 +570,6 @@ export function removePlacement(
 
 export function clearMap(): Placement[] {
   return [];
-}
-
-export function createHistory<T>(initial: T): HistoryState<T> {
-  return { past: [], present: initial, future: [] };
-}
-
-export function commitHistory<T>(history: HistoryState<T>, nextPresent: T): HistoryState<T> {
-  return {
-    past: [...history.past, history.present],
-    present: nextPresent,
-    future: [],
-  };
-}
-
-export function undoHistory<T>(history: HistoryState<T>): HistoryState<T> {
-  if (history.past.length === 0) return history;
-  const previous = history.past[history.past.length - 1];
-  return {
-    past: history.past.slice(0, -1),
-    present: previous,
-    future: [history.present, ...history.future],
-  };
-}
-
-export function redoHistory<T>(history: HistoryState<T>): HistoryState<T> {
-  if (history.future.length === 0) return history;
-  const next = history.future[0];
-  return {
-    past: [...history.past, history.present],
-    present: next,
-    future: history.future.slice(1),
-  };
 }
 
 export function computeCollectionUsage(

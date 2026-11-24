@@ -1,5 +1,8 @@
 import {
   ChevronLeft,
+  CloudFog,
+  Eye,
+  EyeOff,
   FlipHorizontal2,
   RotateCcw,
   RotateCw,
@@ -23,8 +26,10 @@ import {
   type OverlayDragPreview,
   type OverlayRotationPreview,
 } from '../canvas/mapRenderer';
+import { applyFogStroke, type MapViewMode } from '../domain/fogOfWar';
 import {
   HEX_RADIUS,
+  axialKey,
   normalizeRotationDeg,
   screenToWorld,
   worldToAxial,
@@ -108,7 +113,17 @@ interface CanvasViewportProps {
   onRotateAction: (delta: 1 | -1) => void;
   onFlipAction: () => void;
   onExpandInspector: () => void;
+  viewMode: MapViewMode;
+  fogToolActive: boolean;
+  coveredCount: number;
+  onExitFogTool: () => void;
+  onCoverAll: () => void;
+  onRevealAll: () => void;
+  onToggleHostFog: (coord: AxialCoord) => void;
+  onCommitFogStroke: (coords: AxialCoord[], targetCovered: boolean) => void;
 }
+
+const EMPTY_OVER_BUDGET_COORDS = new Set<PlacementKey>();
 
 function displayDeg(deg: number): number {
   const rounded = Math.round(deg) % 360;
@@ -151,6 +166,14 @@ export function CanvasViewport({
   onRotateAction,
   onFlipAction,
   onExpandInspector,
+  viewMode,
+  fogToolActive,
+  coveredCount,
+  onExitFogTool,
+  onCoverAll,
+  onRevealAll,
+  onToggleHostFog,
+  onCommitFogStroke,
 }: CanvasViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -174,6 +197,10 @@ export function CanvasViewport({
   const [dragMove, setDragMove] = useState<DragMovePreview | null>(null);
   const [overlayDrag, setOverlayDrag] = useState<OverlayDragPreview | null>(null);
   const [dialRotatePreview, setDialRotatePreview] = useState<OverlayRotationPreview | null>(null);
+  const [fogStrokePreview, setFogStrokePreview] = useState<{
+    coords: AxialCoord[];
+    targetCovered: boolean;
+  } | null>(null);
   const [emptyHexNotice, setEmptyHexNotice] = useState<string | null>(null);
 
   const panStateRef = useRef<{
@@ -218,6 +245,14 @@ export function CanvasViewport({
     startClientY: number;
     moved: boolean;
   } | null>(null);
+
+  const fogStrokeRef = useRef<{
+    pointerId: number;
+    targetCovered: boolean;
+    coords: Map<PlacementKey, AxialCoord>;
+  } | null>(null);
+
+  const isFogInteractive = viewMode === 'player' || fogToolActive;
 
   const suppressNextClickRef = useRef(false);
   const noticeTimerRef = useRef<number | null>(null);
@@ -325,6 +360,29 @@ export function CanvasViewport({
     prevDraggingBrushRef.current = draggingBrush;
   }, [draggingBrush]);
 
+  useEffect(() => {
+    fogStrokeRef.current = null;
+    setFogStrokePreview(null);
+    if (isFogInteractive) {
+      setHoveredOverlayHit(null);
+      setHoveredDialKnob(false);
+      setDragMove(null);
+      setOverlayDrag(null);
+      setDialRotatePreview(null);
+      moveCandidateRef.current = null;
+      overlayDragRef.current = null;
+      dialDragRef.current = null;
+    }
+  }, [isFogInteractive, viewMode]);
+
+  const renderedPlacements = useMemo(
+    () =>
+      fogStrokePreview
+        ? applyFogStroke(placements, fogStrokePreview.coords, fogStrokePreview.targetCovered)
+        : placements,
+    [placements, fogStrokePreview],
+  );
+
   const hitTestLookup = useMemo(
     () =>
       createOverlayHitTestLookup(
@@ -395,32 +453,38 @@ export function CanvasViewport({
       width: size.width,
       height: size.height,
       camera,
-      placements,
+      placements: renderedPlacements,
       tilesetsById,
       overlayPacksById,
       imageCache: imageCacheRef.current!,
       showGrid,
-      showLabels,
+      showLabels: viewMode === 'gm' && showLabels,
       hoveredCoord,
       hoveredWorldPos,
-      selectedCoord,
-      focusedOverlayId,
-      hoveredOverlayHit,
-      hoveredInspectorOverlayId,
-      activeBrush: previewBrush,
-      overBudgetCoords,
-      dragMove,
-      overlayDrag,
-      overlayRotationPreview: activeRotationPreview,
+      selectedCoord: viewMode === 'gm' && !fogToolActive ? selectedCoord : null,
+      focusedOverlayId: viewMode === 'gm' && !fogToolActive ? focusedOverlayId : null,
+      hoveredOverlayHit: viewMode === 'gm' && !fogToolActive ? hoveredOverlayHit : null,
+      hoveredInspectorOverlayId:
+        viewMode === 'gm' && !fogToolActive ? hoveredInspectorOverlayId : null,
+      activeBrush: viewMode === 'gm' && !fogToolActive ? previewBrush : null,
+      overBudgetCoords: viewMode === 'gm' ? overBudgetCoords : EMPTY_OVER_BUDGET_COORDS,
+      dragMove: viewMode === 'gm' && !fogToolActive ? dragMove : null,
+      overlayDrag: viewMode === 'gm' && !fogToolActive ? overlayDrag : null,
+      overlayRotationPreview:
+        viewMode === 'gm' && !fogToolActive ? activeRotationPreview : null,
+      viewMode,
+      fogToolActive,
     });
   }, [
     size,
     camera,
-    placements,
+    renderedPlacements,
     tilesetsById,
     overlayPacksById,
     showGrid,
     showLabels,
+    viewMode,
+    fogToolActive,
     hoveredCoord,
     hoveredWorldPos,
     selectedCoord,
@@ -481,8 +545,10 @@ export function CanvasViewport({
     : null;
 
   const showFloatingBar =
-    activeBrush !== null ||
-    (rightDrawerCollapsed && (focusedMatch !== null || selectedPlacement !== undefined));
+    viewMode === 'gm' &&
+    (fogToolActive ||
+      activeBrush !== null ||
+      (rightDrawerCollapsed && (focusedMatch !== null || selectedPlacement !== undefined)));
 
   const scheduleClickSuppressionClear = () => {
     suppressNextClickRef.current = true;
@@ -495,17 +561,21 @@ export function CanvasViewport({
     ? 'cursor-grabbing'
     : spacePressed
       ? 'cursor-grab'
-      : activeOverlayBrush
-        ? hoveredCoord && !findPlacementAt(placements, hoveredCoord)
-          ? 'cursor-not-allowed'
-          : 'cursor-crosshair'
-        : activeBrush
-          ? 'cursor-crosshair'
-          : hoveredDialKnob || hoveredOverlayHit
-            ? 'cursor-pointer'
-            : hoveredCoord && findPlacementAt(placements, hoveredCoord)
-              ? 'cursor-grab'
-              : 'cursor-default';
+      : isFogInteractive
+        ? hoveredCoord && findPlacementAt(placements, hoveredCoord)
+          ? 'cursor-pointer'
+          : 'cursor-default'
+        : activeOverlayBrush
+          ? hoveredCoord && !findPlacementAt(placements, hoveredCoord)
+            ? 'cursor-not-allowed'
+            : 'cursor-crosshair'
+          : activeBrush
+            ? 'cursor-crosshair'
+            : hoveredDialKnob || hoveredOverlayHit
+              ? 'cursor-pointer'
+              : hoveredCoord && findPlacementAt(placements, hoveredCoord)
+                ? 'cursor-grab'
+                : 'cursor-default';
 
   return (
     <div ref={containerRef} className="relative h-full min-w-0 flex-1 overflow-hidden bg-[#221f1c]">
@@ -517,8 +587,7 @@ export function CanvasViewport({
             onContextMenuChange(null);
           }
 
-          if (e.button === 1 || (e.button === 0 && spacePressed)) {
-            e.preventDefault();
+          const beginPan = () => {
             e.currentTarget.setPointerCapture(e.pointerId);
             panStateRef.current = {
               pointerId: e.pointerId,
@@ -529,6 +598,33 @@ export function CanvasViewport({
               moved: false,
             };
             setIsPanning(true);
+          };
+
+          if (e.button === 1 || (e.button === 0 && spacePressed)) {
+            e.preventDefault();
+            beginPan();
+            return;
+          }
+
+          if (isFogInteractive) {
+            if (e.button !== 0) return;
+            const world = pointerToWorld(e.clientX, e.clientY);
+            if (!world) return;
+            const coord = worldToAxial(world.x, world.y, HEX_RADIUS);
+            const hit = findPlacementAt(placements, coord);
+            if (hit) {
+              const targetCovered = !Boolean(hit.covered);
+              const key = axialKey(coord.q, coord.r);
+              fogStrokeRef.current = {
+                pointerId: e.pointerId,
+                targetCovered,
+                coords: new Map([[key, coord]]),
+              };
+              setFogStrokePreview({ coords: [coord], targetCovered });
+              e.currentTarget.setPointerCapture(e.pointerId);
+              return;
+            }
+            beginPan();
             return;
           }
 
@@ -598,16 +694,7 @@ export function CanvasViewport({
           }
 
           // 4. Empty space -> pan (or clear selection on stationary click)
-          e.currentTarget.setPointerCapture(e.pointerId);
-          panStateRef.current = {
-            pointerId: e.pointerId,
-            startClientX: e.clientX,
-            startClientY: e.clientY,
-            startCamX: cameraRef.current.x,
-            startCamY: cameraRef.current.y,
-            moved: false,
-          };
-          setIsPanning(true);
+          beginPan();
         }}
         onPointerMove={(e) => {
           const pan = panStateRef.current;
@@ -632,6 +719,27 @@ export function CanvasViewport({
           const coord = worldToAxial(world.x, world.y, HEX_RADIUS);
           setHoveredCoord(coord);
           setHoveredWorldPos(world);
+
+          const fogStroke = fogStrokeRef.current;
+          if (fogStroke && fogStroke.pointerId === e.pointerId) {
+            if (findPlacementAt(placements, coord)) {
+              const key = axialKey(coord.q, coord.r);
+              if (!fogStroke.coords.has(key)) {
+                fogStroke.coords.set(key, coord);
+                setFogStrokePreview({
+                  coords: Array.from(fogStroke.coords.values()),
+                  targetCovered: fogStroke.targetCovered,
+                });
+              }
+            }
+            return;
+          }
+
+          if (isFogInteractive) {
+            setHoveredDialKnob(false);
+            setHoveredOverlayHit(null);
+            return;
+          }
 
           const dialDrag = dialDragRef.current;
           if (dialDrag && dialDrag.pointerId === e.pointerId) {
@@ -735,9 +843,23 @@ export function CanvasViewport({
               e.currentTarget.releasePointerCapture(e.pointerId);
             }
             scheduleClickSuppressionClear();
-            if (!moved && !activeBrush) {
+            if (!moved && !activeBrush && !isFogInteractive) {
               onSelectHostOnly(null);
             }
+            return;
+          }
+
+          const fogStroke = fogStrokeRef.current;
+          if (fogStroke && fogStroke.pointerId === e.pointerId) {
+            const coords = Array.from(fogStroke.coords.values());
+            const targetCovered = fogStroke.targetCovered;
+            fogStrokeRef.current = null;
+            setFogStrokePreview(null);
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+              e.currentTarget.releasePointerCapture(e.pointerId);
+            }
+            scheduleClickSuppressionClear();
+            onCommitFogStroke(coords, targetCovered);
             return;
           }
 
@@ -817,13 +939,18 @@ export function CanvasViewport({
             moveCandidateRef.current = null;
             setDragMove(null);
           }
+          if (fogStrokeRef.current?.pointerId === e.pointerId) {
+            fogStrokeRef.current = null;
+            setFogStrokePreview(null);
+          }
         }}
         onPointerLeave={() => {
           if (
             !panStateRef.current &&
             !dialDragRef.current &&
             !overlayDragRef.current &&
-            !moveCandidateRef.current
+            !moveCandidateRef.current &&
+            !fogStrokeRef.current
           ) {
             setHoveredCoord(null);
             setHoveredWorldPos(null);
@@ -833,6 +960,10 @@ export function CanvasViewport({
         }}
         onContextMenu={(e) => {
           e.preventDefault();
+          if (isFogInteractive) {
+            onContextMenuChange(null);
+            return;
+          }
           const world = pointerToWorld(e.clientX, e.clientY);
           const container = containerRef.current;
           if (!world || !container) return;
@@ -857,6 +988,7 @@ export function CanvasViewport({
           });
         }}
         onDragOver={(e) => {
+          if (viewMode === 'player') return;
           const isOverlayDrag =
             draggingBrush?.kind === 'overlay' ||
             e.dataTransfer.types.includes('application/x-realm-brew-overlay');
@@ -884,6 +1016,7 @@ export function CanvasViewport({
         }}
         onDrop={(e) => {
           e.preventDefault();
+          if (viewMode === 'player') return;
           const world = pointerToWorld(e.clientX, e.clientY);
           const coord = world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
           setHoveredCoord(null);
@@ -935,7 +1068,7 @@ export function CanvasViewport({
             suppressNextClickRef.current = false;
             return;
           }
-          if (spacePressed || e.button !== 0 || !activeBrush) return;
+          if (isFogInteractive || spacePressed || e.button !== 0 || !activeBrush) return;
           const world = pointerToWorld(e.clientX, e.clientY);
           const coord = world ? worldToAxial(world.x, world.y, HEX_RADIUS) : null;
           if (!coord || !world) return;
@@ -985,7 +1118,44 @@ export function CanvasViewport({
       {showFloatingBar && (
         <div className="pointer-events-none absolute inset-x-2 bottom-4 flex justify-center">
           <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 rounded-xl border border-[#2e2a26] bg-[#161412]/95 px-2.5 py-1.5 text-xs shadow-xl backdrop-blur">
-            {activeOverlayBrush && overlayBrushLabel && (
+            {fogToolActive && (
+              <>
+                <span className="flex items-center gap-1.5 font-semibold text-slate-200">
+                  <CloudFog className="h-3.5 w-3.5 text-slate-300" />
+                  Fog Paint
+                </span>
+                <span className="text-stone-400">
+                  Click or drag across Tiles to cover or reveal
+                </span>
+                <button
+                  type="button"
+                  onClick={onCoverAll}
+                  disabled={placements.length === 0 || coveredCount === placements.length}
+                  className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-stone-200 transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <EyeOff className="h-3.5 w-3.5" />
+                  <span>Cover all</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onRevealAll}
+                  disabled={placements.length === 0 || coveredCount === 0}
+                  className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1 text-stone-200 transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  <span>Reveal all</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onExitFogTool}
+                  className="rounded-md border border-slate-500/40 bg-slate-700/40 px-2 py-1 text-slate-100 transition hover:bg-slate-700/60"
+                >
+                  Done (Esc)
+                </button>
+              </>
+            )}
+
+            {!fogToolActive && activeOverlayBrush && overlayBrushLabel && (
               <>
                 <span className="max-w-[180px] truncate font-mono font-semibold text-sky-300">
                   {overlayBrushLabel}
@@ -1021,7 +1191,7 @@ export function CanvasViewport({
               </>
             )}
 
-            {activeTileBrush && activeTargetLabel && (
+            {!fogToolActive && activeTileBrush && activeTargetLabel && (
               <>
                 <span className="whitespace-nowrap font-mono font-semibold text-amber-300">
                   {activeTargetLabel}
@@ -1071,7 +1241,7 @@ export function CanvasViewport({
               </>
             )}
 
-            {!activeBrush && focusedMatch && focusedLabel && (
+            {!fogToolActive && !activeBrush && focusedMatch && focusedLabel && (
               <>
                 <span className="max-w-[180px] truncate font-semibold text-sky-300">
                   {focusedLabel}
@@ -1109,7 +1279,7 @@ export function CanvasViewport({
               </>
             )}
 
-            {!activeBrush && !focusedMatch && selectedPlacement && activeTargetLabel && (
+            {!fogToolActive && !activeBrush && !focusedMatch && selectedPlacement && activeTargetLabel && (
               <>
                 <span className="whitespace-nowrap font-mono font-semibold text-amber-300">
                   {activeTargetLabel} ({selectedPlacement.q}, {selectedPlacement.r})
@@ -1151,6 +1321,35 @@ export function CanvasViewport({
                 </button>
                 <button
                   type="button"
+                  onClick={() =>
+                    onToggleHostFog({ q: selectedPlacement.q, r: selectedPlacement.r })
+                  }
+                  aria-pressed={Boolean(selectedPlacement.covered)}
+                  title={
+                    selectedPlacement.covered
+                      ? 'Reveal Placement from Fog of War'
+                      : 'Cover Placement with Fog of War'
+                  }
+                  className={`flex items-center gap-1 rounded-md border px-2 py-1 transition ${
+                    selectedPlacement.covered
+                      ? 'border-slate-400/50 bg-slate-700/50 text-slate-100 hover:bg-slate-700/70'
+                      : 'border-[#2e2a26] bg-[#1c1917] text-stone-200 hover:bg-stone-800'
+                  }`}
+                >
+                  {selectedPlacement.covered ? (
+                    <>
+                      <Eye className="h-3.5 w-3.5 text-sky-300" />
+                      <span>Reveal</span>
+                    </>
+                  ) : (
+                    <>
+                      <EyeOff className="h-3.5 w-3.5 text-slate-300" />
+                      <span>Cover</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
                   onClick={() => onRemoveAt({ q: selectedPlacement.q, r: selectedPlacement.r })}
                   title="Remove Host Tile & attached Overlays (Del)"
                   className="flex items-center gap-1 rounded-md border border-red-500/30 bg-red-950/50 px-2 py-1 text-red-200 transition hover:bg-red-900/60"
@@ -1161,7 +1360,7 @@ export function CanvasViewport({
               </>
             )}
 
-            {rightDrawerCollapsed && (
+            {!fogToolActive && rightDrawerCollapsed && (
               <button
                 type="button"
                 onClick={onExpandInspector}
@@ -1176,10 +1375,12 @@ export function CanvasViewport({
         </div>
       )}
 
-      {placements.length === 0 && !activeBrush && (
+      {placements.length === 0 && !activeBrush && !fogToolActive && (
         <div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center">
           <div className="rounded-full border border-[#2e2a26] bg-[#161412]/90 px-4 py-1.5 text-xs text-stone-300 shadow-lg">
-            Click or drag any Tile Face from the Tile Palette onto the hex grid
+            {viewMode === 'player'
+              ? 'No Tiles placed on this Map'
+              : 'Click or drag any Tile Face from the Tile Palette onto the hex grid'}
           </div>
         </div>
       )}

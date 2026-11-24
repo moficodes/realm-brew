@@ -24,6 +24,7 @@ interface RightDrawerProps {
   onHoverOverlayId: (overlayId: string | null) => void;
   onRotateHost: (coord: AxialCoord, delta: 1 | -1) => void;
   onFlipHost: (coord: AxialCoord) => void;
+  onToggleHostFog: (coord: AxialCoord) => void;
   onRemoveHost: (coord: AxialCoord) => void;
   onReorderOverlay: (hostCoord: AxialCoord, overlayId: string, direction: 'up' | 'down') => void;
   onRemoveOverlay: (hostCoord: AxialCoord, overlayId: string) => void;
@@ -53,6 +54,7 @@ export function RightDrawer({
   onHoverOverlayId,
   onRotateHost,
   onFlipHost,
+  onToggleHostFog,
   onRemoveHost,
   onReorderOverlay,
   onRemoveOverlay,
@@ -169,6 +171,7 @@ export function RightDrawer({
           onHoverOverlayId={onHoverOverlayId}
           onRotateHost={onRotateHost}
           onFlipHost={onFlipHost}
+          onToggleHostFog={onToggleHostFog}
           onRemoveHost={onRemoveHost}
           onReorderOverlay={onReorderOverlay}
           onRemoveOverlay={onRemoveOverlay}

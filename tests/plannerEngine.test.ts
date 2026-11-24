@@ -2,16 +2,23 @@ import { describe, expect, it } from 'vitest';
 import { HEX_RADIUS, axialToWorld } from '../src/domain/hexGeometry';
 import { overlayLocalToWorld } from '../src/domain/overlayGeometry';
 import {
+  applyFogStroke,
   attachOverlayAtWorld,
   buildOverlayPaletteSections,
   canFlipTarget,
+  canRedoWithFence,
+  canUndoWithFence,
   centerOverlayOnHost,
   clearMap,
   commitHistory,
+  commitWithFence,
   compactPlacement,
   computeCollectionUsage,
   computePullList,
+  countCoveredPlacements,
+  coverAllPlacements,
   createHistory,
+  enterPlayerViewSession,
   extractOverlayPrefix,
   findOverlayById,
   findOverlayOnHost,
@@ -30,19 +37,25 @@ import {
   placeTile,
   reconcileSelectionAfterHistory,
   redoHistory,
+  redoWithFence,
   removeOverlay,
   removePlacement,
   reorderOverlayZ,
+  resolveFogTileFaceUrl,
   resolveOverlayAsset,
   resolvePlacementAsset,
+  revealAllPlacements,
   rotateOverlayByDelta,
   rotatePlacement,
   rotateStep,
   setOverlayLocalRotation,
   setOverlayWorldRotation,
+  setPlacementCovered,
   sortOverlayPacksPairedFirst,
   toMapSummary,
+  togglePlacementFog,
   undoHistory,
+  undoWithFence,
   validateAndParseMapJson,
   validateCollection,
   validatePlacements,
@@ -1391,5 +1404,327 @@ describe('Overlay attach & host-Tile lifecycle engine commands (Seam 2)', () => 
     history = commitHistory(history, afterDelete);
     selection = reconcileSelectionAfterHistory(history.present, { q: 1, r: 0 }, 'ov-1');
     expect(selection).toEqual({ selectedCoord: { q: 1, r: 0 }, focusedOverlayId: null });
+  });
+});
+
+describe('Fog of War commands & Player View session fence (Seam 2)', () => {
+  it('toggles and sets Placement covered state with no-op suppression while keeping Collection and Pull List totals unchanged', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const sr = makeTestTileset('subterranean-rivers', 'SR');
+    const pack: OverlayPack = {
+      id: 'man-hewn-dungeons',
+      name: 'Man Hewn Dungeons',
+      shortCode: 'MHD',
+      pairedTilesetId: 'man-hewn-dungeons',
+      overlays: [
+        {
+          overlayId: 'bridge-1',
+          overlayPackId: 'man-hewn-dungeons',
+          label: 'Bridge 1',
+          filename: 'Bridge 1.png',
+          url: '/api/overlay-assets/man-hewn-dungeons/Bridge%201.png',
+        },
+      ],
+    };
+    const collection: Collection = {
+      version: 2,
+      tilesets: { 'man-hewn-dungeons': 2, 'subterranean-rivers': 2 },
+      overlayPacks: { 'man-hewn-dungeons': 1 },
+    };
+
+    let placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          {
+            id: 'ov-1',
+            overlayPackId: pack.id,
+            overlayId: 'bridge-1',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: sr.id,
+        tileId: '37-37',
+        faceNumber: 37,
+        rotation: 2,
+      },
+    ];
+
+    expect(countCoveredPlacements(placements)).toBe(0);
+
+    // No-op on empty hex and no-op when setting same state
+    expect(togglePlacementFog(placements, { q: 9, r: 9 })).toBe(placements);
+    expect(setPlacementCovered(placements, { q: 0, r: 0 }, false)).toBe(placements);
+
+    // Toggle (0, 0) to covered
+    placements = togglePlacementFog(placements, { q: 0, r: 0 });
+    expect(placements[0].covered).toBe(true);
+    expect(countCoveredPlacements(placements)).toBe(1);
+    expect(setPlacementCovered(placements, { q: 0, r: 0 }, true)).toBe(placements);
+
+    // Digital Fog on MHD (0,0) does NOT consume MHD #37 or add MHD #37 to Pull List,
+    // while covered Placements stay included in Collection usage and Pull List totals,
+    // and physical SR #37 at (1,0) remains tracked normally.
+    const usage = computeCollectionUsage(placements, [mhd, sr], collection, [pack]);
+    expect(usage.byTileKey.get('man-hewn-dungeons:37-37')?.used).toBe(0);
+    expect(usage.byTileKey.get('man-hewn-dungeons:01-02')?.used).toBe(1);
+    expect(usage.byOverlayKey.get('man-hewn-dungeons:bridge-1')?.used).toBe(1);
+    expect(usage.byTileKey.get('subterranean-rivers:37-37')?.used).toBe(1);
+
+    const pullList = computePullList(placements, [mhd, sr], collection);
+    expect(pullList.totalPlacements).toBe(2);
+    expect(pullList.groups.find((g) => g.tilesetId === mhd.id)?.items).toHaveLength(1);
+    expect(pullList.groups.find((g) => g.tilesetId === sr.id)?.items[0].tileId).toBe('37-37');
+
+    // Reveal (0, 0) removes covered flag cleanly
+    placements = togglePlacementFog(placements, { q: 0, r: 0 });
+    expect(Boolean(placements[0].covered)).toBe(false);
+    expect(countCoveredPlacements(placements)).toBe(0);
+  });
+
+  it('resolves #37 Fog artwork from host Tileset, falling back to first discovered Tileset and then null (#1c1a18)', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const sr = makeTestTileset('subterranean-rivers', 'SR');
+    const noFogTileset: Tileset = {
+      id: 'no-fog',
+      name: 'No Fog',
+      shortCode: 'NF',
+      tiles: [
+        {
+          tileId: '01-02',
+          tilesetId: 'no-fog',
+          isSymmetric: false,
+          faceA: { faceNumber: 1, label: '01', filename: '01.png', url: '/api/assets/no-fog/01.png' },
+          faceB: { faceNumber: 2, label: '02', filename: '02.png', url: '/api/assets/no-fog/02.png' },
+        },
+      ],
+    };
+
+    const byId = new Map<string, Tileset>([
+      [mhd.id, mhd],
+      [sr.id, sr],
+      [noFogTileset.id, noFogTileset],
+    ]);
+
+    // Host Tileset #37
+    expect(resolveFogTileFaceUrl(sr.id, byId)).toBe('/api/assets/subterranean-rivers/37.png');
+    // Missing Tileset or Tileset without #37 falls back silently to first discovered Tileset #37
+    expect(resolveFogTileFaceUrl('missing-tileset', byId)).toBe('/api/assets/man-hewn-dungeons/37.png');
+    expect(resolveFogTileFaceUrl('no-fog', byId)).toBe('/api/assets/man-hewn-dungeons/37.png');
+    // Failed host #37 URL falls back to first working #37 URL
+    expect(
+      resolveFogTileFaceUrl(sr.id, byId, (url) => url === '/api/assets/subterranean-rivers/37.png'),
+    ).toBe('/api/assets/man-hewn-dungeons/37.png');
+    // All #37 URLs unavailable returns null (solid charcoal #1c1a18 fallback)
+    expect(resolveFogTileFaceUrl('missing-tileset', new Map([[noFogTileset.id, noFogTileset]]))).toBeNull();
+    expect(resolveFogTileFaceUrl('missing-tileset', new Map())).toBeNull();
+  });
+
+  it('applies drag-paint Fog strokes and bulk Cover all / Reveal all atomically with no-op suppression', () => {
+    const base: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 },
+      { q: 1, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 2, rotation: 1, covered: true },
+      { q: 2, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 2 },
+    ];
+
+    // No-op when empty map or only empty hexes visited or target state already matches
+    expect(coverAllPlacements([])).toBeInstanceOf(Array);
+    expect(revealAllPlacements([])).toHaveLength(0);
+    expect(applyFogStroke(base, [{ q: 9, r: 9 }], true)).toBe(base);
+    expect(applyFogStroke(base, [{ q: 1, r: 0 }], true)).toBe(base);
+
+    // Drag-paint stroke from (0,0) across empty (5,5) to (1,0) and (2,0) with targetCovered=true
+    let history = createHistory(base);
+    const stroked = applyFogStroke(
+      history.present,
+      [
+        { q: 0, r: 0 },
+        { q: 5, r: 5 }, // empty hex ignored
+        { q: 1, r: 0 }, // already covered
+        { q: 2, r: 0 },
+        { q: 0, r: 0 }, // duplicate coord
+      ],
+      true,
+    );
+    expect(stroked.map((p) => Boolean(p.covered))).toEqual([true, true, true]);
+    history = commitHistory(history, stroked);
+
+    // 1 atomic Undo reverts the entire multi-hex drag-paint stroke
+    history = undoHistory(history);
+    expect(history.present.map((p) => Boolean(p.covered))).toEqual([false, true, false]);
+
+    // Bulk Cover all -> no-op if already all covered -> Reveal all -> no-op if already all revealed
+    const allCovered = coverAllPlacements(history.present);
+    expect(allCovered.map((p) => Boolean(p.covered))).toEqual([true, true, true]);
+    expect(coverAllPlacements(allCovered)).toBe(allCovered);
+
+    const allRevealed = revealAllPlacements(allCovered);
+    expect(allRevealed.map((p) => Boolean(p.covered))).toEqual([false, false, false]);
+    expect(revealAllPlacements(allRevealed)).toBe(allRevealed);
+  });
+
+  it('preserves covered across host move, swap, rotate, flip, and replace, and deletes covered atomically on remove/clear', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const sr = makeTestTileset('subterranean-rivers', 'SR');
+
+    // Newly placed Tiles default to revealed (no covered flag)
+    let placements = placeTile([], {
+      q: 0,
+      r: 0,
+      tilesetId: mhd.id,
+      tileId: '01-02',
+      faceNumber: 1,
+      rotation: 0,
+    });
+    placements = placeTile(placements, {
+      q: 1,
+      r: 0,
+      tilesetId: sr.id,
+      tileId: '03-04',
+      faceNumber: 3,
+      rotation: 0,
+    });
+    expect(Boolean(placements[0].covered)).toBe(false);
+    expect(Boolean(placements[1].covered)).toBe(false);
+
+    // Cover (0, 0), keep (1, 0) revealed
+    placements = setPlacementCovered(placements, { q: 0, r: 0 }, true);
+
+    // Rotate & Flip preserve covered
+    placements = rotatePlacement(placements, { q: 0, r: 0 }, 1);
+    expect(placements.find((p) => p.q === 0 && p.r === 0)?.covered).toBe(true);
+    placements = flipPlacement(placements, { q: 0, r: 0 }, [mhd, sr]);
+    expect(placements.find((p) => p.q === 0 && p.r === 0)?.covered).toBe(true);
+
+    // Tile replacement preserves covered
+    placements = placeTile(placements, {
+      q: 0,
+      r: 0,
+      tilesetId: sr.id,
+      tileId: '01-02',
+      faceNumber: 1,
+      rotation: 3,
+    });
+    expect(placements.find((p) => p.q === 0 && p.r === 0)?.covered).toBe(true);
+
+    // Move to empty hex & swap with revealed hex carry covered with the moving Placement
+    placements = moveOrSwapPlacement(placements, { q: 0, r: 0 }, { q: 0, r: 1 });
+    expect(placements.find((p) => p.q === 0 && p.r === 1)?.covered).toBe(true);
+    placements = moveOrSwapPlacement(placements, { q: 0, r: 1 }, { q: 1, r: 0 });
+    expect(placements.find((p) => p.q === 1 && p.r === 0)?.covered).toBe(true);
+    expect(Boolean(placements.find((p) => p.q === 0 && p.r === 1)?.covered)).toBe(false);
+
+    // Remove & Clear Map delete covered atomically and restore on Undo
+    let history = createHistory(placements);
+    history = commitHistory(history, removePlacement(history.present, { q: 1, r: 0 }));
+    expect(countCoveredPlacements(history.present)).toBe(0);
+    history = undoHistory(history);
+    expect(history.present.find((p) => p.q === 1 && p.r === 0)?.covered).toBe(true);
+
+    history = commitHistory(history, clearMap());
+    expect(history.present).toEqual([]);
+    history = undoHistory(history);
+    expect(countCoveredPlacements(history.present)).toBe(1);
+    expect(history.present.find((p) => p.q === 1 && p.r === 0)?.covered).toBe(true);
+  });
+
+  it('enforces Player View session fence (undoFloor, playerRedoCount) on unified stack and lifts fence on return to GM View', () => {
+    const s0: Placement[] = [
+      { q: 0, r: 0, tilesetId: 'mhd', tileId: '01-02', faceNumber: 1, rotation: 0 },
+    ];
+    const s1 = placeTile(s0, { q: 1, r: 0, tilesetId: 'mhd', tileId: '03-04', faceNumber: 3, rotation: 0 });
+    const s2 = rotatePlacement(s1, { q: 1, r: 0 }, 1);
+    const s3 = flipPlacement(s2, { q: 0, r: 0 }, [makeTestTileset('mhd', 'MHD')]);
+
+    // GM made 3 edits and undid s3, leaving future=[s3]
+    let history = createHistory(s0);
+    history = commitHistory(history, s1);
+    history = commitHistory(history, s2);
+    history = commitHistory(history, s3);
+    history = undoHistory(history);
+    expect(history.past).toHaveLength(2);
+    expect(history.present).toBe(s2);
+    expect(history.future).toEqual([s3]);
+
+    // 1. Entering Player View with no Player edits: cannot undo GM past, cannot redo undone GM s3
+    let fence = enterPlayerViewSession(history);
+    expect(fence).toEqual({ undoFloor: 2, playerRedoCount: 0 });
+    expect(canUndoWithFence(history, fence)).toBe(false);
+    expect(canRedoWithFence(history, fence)).toBe(false);
+    expect(undoWithFence(history, fence).changed).toBe(false);
+    expect(redoWithFence(history, fence).changed).toBe(false);
+
+    // Leaving Player View without edits restores full GM Undo/Redo (including undone s3)
+    expect(canUndoWithFence(history, null)).toBe(true);
+    expect(canRedoWithFence(history, null)).toBe(true);
+
+    // 2. Re-enter Player View and perform two Fog edits (P1, P2)
+    fence = enterPlayerViewSession(history);
+    const p1 = togglePlacementFog(history.present, { q: 0, r: 0 });
+    const p2 = togglePlacementFog(p1, { q: 1, r: 0 });
+
+    // No-op commit leaves fence & future untouched
+    const noopCommit = commitWithFence(history, fence, history.present);
+    expect(noopCommit.history).toBe(history);
+
+    ({ history, fence } = commitWithFence(history, fence!, p1));
+    ({ history, fence } = commitWithFence(history, fence!, p2));
+    expect(history.past).toHaveLength(4);
+    expect(fence).toEqual({ undoFloor: 2, playerRedoCount: 0 });
+    expect(canUndoWithFence(history, fence)).toBe(true);
+    expect(canRedoWithFence(history, fence)).toBe(false);
+
+    // Undo twice back to s2, then 3rd Undo is blocked at undoFloor
+    let undoRes = undoWithFence(history, fence);
+    expect(undoRes.changed).toBe(true);
+    history = undoRes.history;
+    fence = undoRes.fence!;
+    expect(history.present).toBe(p1);
+    expect(fence).toEqual({ undoFloor: 2, playerRedoCount: 1 });
+
+    undoRes = undoWithFence(history, fence);
+    expect(undoRes.changed).toBe(true);
+    history = undoRes.history;
+    fence = undoRes.fence!;
+    expect(history.present).toBe(s2);
+    expect(fence).toEqual({ undoFloor: 2, playerRedoCount: 2 });
+
+    expect(canUndoWithFence(history, fence)).toBe(false);
+    expect(undoWithFence(history, fence).changed).toBe(false);
+
+    // Redo once to p1, then new Player edit p3 resets playerRedoCount to 0
+    const redoRes = redoWithFence(history, fence);
+    expect(redoRes.changed).toBe(true);
+    history = redoRes.history;
+    fence = redoRes.fence!;
+    expect(history.present).toBe(p1);
+    expect(fence).toEqual({ undoFloor: 2, playerRedoCount: 1 });
+
+    const p3 = setPlacementCovered(p1, { q: 1, r: 0 }, true);
+    ({ history, fence } = commitWithFence(history, fence, p3));
+    expect(fence).toEqual({ undoFloor: 2, playerRedoCount: 0 });
+    expect(canRedoWithFence(history, fence)).toBe(false);
+
+    // 3. Returning to GM View lifts fence; GM can undo across Player edits back into GM edits
+    expect(canUndoWithFence(history, null)).toBe(true);
+    let gmUndo = undoWithFence(history, null); // back to p1
+    expect(gmUndo.history.present).toBe(p1);
+    gmUndo = undoWithFence(gmUndo.history, null); // back to s2
+    expect(gmUndo.history.present).toBe(s2);
+    gmUndo = undoWithFence(gmUndo.history, null); // back to s1
+    expect(gmUndo.history.present).toBe(s1);
+    gmUndo = undoWithFence(gmUndo.history, null); // back to s0
+    expect(gmUndo.history.present).toBe(s0);
   });
 });
