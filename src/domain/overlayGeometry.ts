@@ -294,3 +294,96 @@ export function isPointOnDialKnob(
   const hitRadius = Math.max(11 / Math.max(0.1, zoom), 9);
   return Math.hypot(worldX - dial.knobX, worldY - dial.knobY) <= hitRadius;
 }
+
+const HEX_SQRT3 = Math.sqrt(3);
+const HEX_UNIT_APOTHEM = HEX_SQRT3 / 2;
+
+/** Return true if a world-space point lies inside or on the boundary of a flat-top hex. */
+export function isPointInFlatTopHex(
+  worldX: number,
+  worldY: number,
+  hostCoord: AxialCoord,
+  radius = HEX_RADIUS,
+  epsilon = 1e-6,
+): boolean {
+  const center = axialToWorld(hostCoord.q, hostCoord.r, radius);
+  const dx = Math.abs(worldX - center.x) / radius;
+  const dy = Math.abs(worldY - center.y) / radius;
+  const t1 = dy / HEX_UNIT_APOTHEM;
+  const t2 = dx + dy / HEX_SQRT3;
+  return Math.max(t1, t2) <= 1 + epsilon;
+}
+
+/** Compute the 4 world-space corner points of a rotated Overlay bounding box. */
+export function getOverlayOBBCorners(
+  worldX: number,
+  worldY: number,
+  width: number,
+  height: number,
+  worldRad: number,
+): [Point2D, Point2D, Point2D, Point2D] {
+  const hw = width / 2;
+  const hh = height / 2;
+  const cos = Math.cos(worldRad);
+  const sin = Math.sin(worldRad);
+
+  const rotate = (lx: number, ly: number): Point2D => ({
+    x: normalizeZero(worldX + lx * cos - ly * sin),
+    y: normalizeZero(worldY + lx * sin + ly * cos),
+  });
+
+  return [
+    rotate(-hw, -hh),
+    rotate(hw, -hh),
+    rotate(hw, hh),
+    rotate(-hw, hh),
+  ];
+}
+
+/** Compute the world-space axis-aligned bounding box of a rotated Overlay OBB. */
+export function computeOverlayWorldBounds(
+  worldX: number,
+  worldY: number,
+  width: number,
+  height: number,
+  worldRad: number,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const corners = getOverlayOBBCorners(worldX, worldY, width, height, worldRad);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const pt of corners) {
+    if (pt.x < minX) minX = pt.x;
+    if (pt.y < minY) minY = pt.y;
+    if (pt.x > maxX) maxX = pt.x;
+    if (pt.y > maxY) maxY = pt.y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/** Return true if any corner of an Overlay's world OBB extends past its host flat-top hex boundary. */
+export function doesOverlayBoxOverhangHostHex(
+  worldX: number,
+  worldY: number,
+  width: number,
+  height: number,
+  worldRad: number,
+  hostCoord: AxialCoord,
+  radius = HEX_RADIUS,
+): boolean {
+  const corners = getOverlayOBBCorners(worldX, worldY, width, height, worldRad);
+  return corners.some((corner) => !isPointInFlatTopHex(corner.x, corner.y, hostCoord, radius));
+}
+
+/** Return true if an Overlay Placement's rotated world box overhangs past its host hex boundary. */
+export function doesOverlayOverhangHostHex(
+  host: Pick<Placement, 'q' | 'r' | 'rotation'>,
+  overlay: Pick<OverlayPlacement, 'offsetX' | 'offsetY' | 'rotationDeg'>,
+  pixelSize?: { width: number; height: number } | null,
+  radius = HEX_RADIUS,
+): boolean {
+  const t = overlayLocalToWorld(host, overlay, radius);
+  const { width, height } = getOverlayWorldSize(pixelSize);
+  return doesOverlayBoxOverhangHostHex(t.x, t.y, width, height, t.worldRad, host, radius);
+}

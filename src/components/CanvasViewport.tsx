@@ -46,6 +46,7 @@ import {
   findPlacementAt,
   formatAssemblyLabel,
   resolveOverlayAsset,
+  type PullListHighlight,
 } from '../domain/plannerEngine';
 import type {
   ActiveBrush,
@@ -70,11 +71,13 @@ interface CanvasViewportProps {
   selectedCoord: AxialCoord | null;
   focusedOverlayId: string | null;
   hoveredInspectorOverlayId: string | null;
+  pullListHighlight: PullListHighlight | null;
   inspectorRotationPreview: { hostCoord: AxialCoord; overlayId: string; worldDeg: number } | null;
   rightDrawerCollapsed: boolean;
   contextMenu: OverlayContextMenuState | null;
   onContextMenuChange: (menu: OverlayContextMenuState | null) => void;
   overBudgetCoords: ReadonlySet<PlacementKey>;
+  overBudgetOverlayIds: ReadonlySet<string>;
   showGrid: boolean;
   showLabels: boolean;
   camera: Camera;
@@ -124,11 +127,13 @@ export function CanvasViewport({
   selectedCoord,
   focusedOverlayId,
   hoveredInspectorOverlayId,
+  pullListHighlight,
   inspectorRotationPreview,
   rightDrawerCollapsed,
   contextMenu,
   onContextMenuChange,
   overBudgetCoords,
+  overBudgetOverlayIds,
   showGrid,
   showLabels,
   camera,
@@ -407,8 +412,10 @@ export function CanvasViewport({
       focusedOverlayId,
       hoveredOverlayHit,
       hoveredInspectorOverlayId,
+      pullListHighlight,
       activeBrush: previewBrush,
       overBudgetCoords,
+      overBudgetOverlayIds,
       dragMove,
       overlayDrag,
       overlayRotationPreview: activeRotationPreview,
@@ -427,8 +434,10 @@ export function CanvasViewport({
     focusedOverlayId,
     hoveredOverlayHit,
     hoveredInspectorOverlayId,
+    pullListHighlight,
     previewBrush,
     overBudgetCoords,
+    overBudgetOverlayIds,
     dragMove,
     overlayDrag,
     activeRotationPreview,

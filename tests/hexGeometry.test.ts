@@ -9,6 +9,7 @@ import {
   clampOffsetToUnitHex,
   computeExportBounds,
   computeFitCamera,
+  computePanToFocusCamera,
   hexCorners,
   normalizeRotationDeg,
   screenToAxial,
@@ -23,16 +24,27 @@ import {
   MISSING_OVERLAY_WIDTH,
   OVERLAY_WORLD_PER_PIXEL,
   clampWorldPointToHostHex,
+  computeOverlayWorldBounds,
+  doesOverlayOverhangHostHex,
   getOverlayDialGeometry,
+  getOverlayOBBCorners,
   getOverlayWorldSize,
   hitTestOverlaysAtWorld,
+  isPointInFlatTopHex,
   isPointOnDialKnob,
   overlayLocalToWorld,
   reprojectOverlayToHost,
   worldToClampedOverlayLocal,
   worldToOverlayLocal,
 } from '../src/domain/overlayGeometry';
-import type { Placement } from '../src/domain/types';
+import {
+  OVERLAY_CALLOUT_HEIGHT,
+  OVERLAY_CALLOUT_MAX_WIDTH,
+  getCalloutLayoutBounds,
+  layoutAssemblyCallouts,
+  type CalloutBox,
+} from '../src/domain/calloutLayout';
+import type { OverlayPack, Placement, Tileset } from '../src/domain/types';
 
 describe('Flat-top hex geometry (Seam 2)', () => {
   it('maintains exact 2 : sqrt(3) flat-top proportions', () => {
@@ -475,5 +487,293 @@ describe('Overlay geometry & host-local transforms (Seam 3)', () => {
     expect(isPointOnDialKnob(82 + 15, 0, hugeDial, 1)).toBe(false);
     // Zoomed out (zoom = 0.5) expands world hit radius to 11 / 0.5 = 22
     expect(isPointOnDialKnob(82 + 18, 0, hugeDial, 0.5)).toBe(true);
+  });
+
+  it('detects whether rotated Overlay OBBs overhang past their host hex boundary', () => {
+    const host = { q: 0, r: 0, rotation: 0 as const };
+
+    // Small 180x180px (30x30 world units) centered at (0, 0) stays completely inside host hex
+    expect(
+      doesOverlayOverhangHostHex(
+        host,
+        { offsetX: 0, offsetY: 0, rotationDeg: 45 },
+        { width: 180, height: 180 },
+      ),
+    ).toBe(false);
+
+    // Same 30x30 piece anchored right on the edge (offsetX = 0.9 -> x=90, corner at x=105 > 100) overhangs
+    expect(
+      doesOverlayOverhangHostHex(
+        host,
+        { offsetX: 0.9, offsetY: 0, rotationDeg: 0 },
+        { width: 180, height: 180 },
+      ),
+    ).toBe(true);
+
+    // Bridge 600x240px (100x40 world) at center fits inside flat-top hex (half-w=50, half-h=20 -> 50 + 20/sqrt3 = 61.5 <= 100)
+    expect(
+      doesOverlayOverhangHostHex(
+        host,
+        { offsetX: 0, offsetY: 0, rotationDeg: 0 },
+        { width: 600, height: 240 },
+      ),
+    ).toBe(false);
+
+    // Same bridge rotated 90° (40 wide, 100 tall -> half-h=50 <= 86.6, half-w=20 -> 20 + 50/sqrt3 = 48.9 <= 100) fits
+    // Anchored near top rim (offsetY = -0.7 -> y=-70, top at -120 < -86.6) overhangs!
+    expect(
+      doesOverlayOverhangHostHex(
+        host,
+        { offsetX: 0, offsetY: -0.7, rotationDeg: 90 },
+        { width: 600, height: 240 },
+      ),
+    ).toBe(true);
+
+    // Missing fallback 72x44 anchored near corner overhangs while centered does not
+    expect(
+      doesOverlayOverhangHostHex(host, { offsetX: 0, offsetY: 0, rotationDeg: 0 }, null),
+    ).toBe(false);
+    expect(
+      doesOverlayOverhangHostHex(host, { offsetX: 0.85, offsetY: 0, rotationDeg: 0 }, null),
+    ).toBe(true);
+
+    // World bounds of 100x40 rotated 90° is 40 wide x 100 tall
+    const bounds = computeOverlayWorldBounds(10, 20, 100, 40, Math.PI / 2);
+    expect(bounds.minX).toBeCloseTo(-10, 8);
+    expect(bounds.maxX).toBeCloseTo(30, 8);
+    expect(bounds.minY).toBeCloseTo(-30, 8);
+    expect(bounds.maxY).toBeCloseTo(70, 8);
+    expect(isPointInFlatTopHex(100, 0, { q: 0, r: 0 })).toBe(true);
+    expect(isPointInFlatTopHex(101, 0, { q: 0, r: 0 })).toBe(false);
+    expect(getOverlayOBBCorners(0, 0, 10, 20, 0)).toHaveLength(4);
+  });
+});
+
+describe('World-space Assembly Callouts & collision solver (Seam 3)', () => {
+  const mhdTileset: Tileset = {
+    id: 'man-hewn-dungeons',
+    name: 'Man Hewn Dungeons',
+    shortCode: 'MHD',
+    tiles: [
+      {
+        tileId: '01-02',
+        tilesetId: 'man-hewn-dungeons',
+        isSymmetric: false,
+        faceA: { faceNumber: 1, label: '01', filename: '01.png', url: '/api/assets/man-hewn-dungeons/01.png' },
+        faceB: { faceNumber: 2, label: '02', filename: '02.png', url: '/api/assets/man-hewn-dungeons/02.png' },
+      },
+    ],
+  };
+
+  const awPack: OverlayPack = {
+    id: 'alchemists-workshop',
+    name: "Alchemists' Workshop",
+    shortCode: 'AW',
+    pairedTilesetId: null,
+    overlays: [
+      {
+        overlayId: 'short',
+        overlayPackId: 'alchemists-workshop',
+        label: 'Orb',
+        filename: 'Orb.png',
+        url: '/api/overlay-assets/alchemists-workshop/Orb.png',
+      },
+      {
+        overlayId: 'very-long-name',
+        overlayPackId: 'alchemists-workshop',
+        label: 'Extraordinarily Ornate Alchemical Distillation Apparatus Bench',
+        filename: 'Extraordinarily Ornate Alchemical Distillation Apparatus Bench.png',
+        url: '/api/overlay-assets/alchemists-workshop/long.png',
+      },
+    ],
+  };
+
+  const tilesetsById = new Map([[mhdTileset.id, mhdTileset]]);
+  const overlayPacksById = new Map([[awPack.id, awPack]]);
+
+  it('formats Overlay callout labels with ~150u truncation, missing fallback, over-budget state, and overhang-only tethers', () => {
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhdTileset.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          {
+            // Small interior overlay near right-bottom (non-overhanging)
+            id: 'ov-short',
+            overlayPackId: awPack.id,
+            overlayId: 'short',
+            offsetX: 0.4,
+            offsetY: 0.4,
+            rotationDeg: 0,
+          },
+          {
+            // Long label + anchored right on rim -> overhangs host hex
+            id: 'ov-long',
+            overlayPackId: awPack.id,
+            overlayId: 'very-long-name',
+            offsetX: 0.9,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+          {
+            // Missing pack/overlay
+            id: 'ov-missing',
+            overlayPackId: 'lost-pack',
+            overlayId: 'secret-trap',
+            offsetX: 0,
+            offsetY: 0,
+            rotationDeg: 0,
+          },
+        ],
+      },
+    ];
+
+    const layout = layoutAssemblyCallouts({
+      placements,
+      tilesetsById,
+      overlayPacksById,
+      overBudgetCoords: new Set(['0,0']),
+      overBudgetOverlayIds: new Set(['ov-long']),
+      getOverlayPixelSize: (ov) => {
+        if (ov.overlayId === 'short') return { width: 120, height: 120 }; // 20x20 world
+        if (ov.overlayId === 'very-long-name') return { width: 300, height: 180 }; // 50x30 world
+        return null; // 72x44 missing
+      },
+    });
+
+    expect(layout.tileCallouts).toHaveLength(1);
+    expect(layout.tileCallouts[0]).toMatchObject({
+      label: 'MHD #01',
+      isOverBudget: true,
+    });
+
+    expect(layout.overlayCallouts).toHaveLength(3);
+    const shortCallout = layout.overlayCallouts.find((c) => c.id === 'ov-short')!;
+    const longCallout = layout.overlayCallouts.find((c) => c.id === 'ov-long')!;
+    const missingCallout = layout.overlayCallouts.find((c) => c.id === 'ov-missing')!;
+
+    expect(shortCallout.label).toBe('AW Orb');
+    expect(shortCallout.isMissing).toBe(false);
+    expect(shortCallout.isOverBudget).toBe(false);
+    expect(shortCallout.showHostTether).toBe(false);
+    expect(shortCallout.pillHeight).toBe(OVERLAY_CALLOUT_HEIGHT);
+
+    expect(longCallout.label.endsWith('…')).toBe(true);
+    expect(longCallout.pillWidth).toBeLessThanOrEqual(OVERLAY_CALLOUT_MAX_WIDTH);
+    expect(longCallout.isOverBudget).toBe(true);
+    expect(longCallout.showHostTether).toBe(true);
+
+    expect(missingCallout.fullLabel).toBe('?lost-pack secret-trap');
+    expect(missingCallout.label).toBe('?lost-pack secret-tr…');
+    expect(missingCallout.isMissing).toBe(true);
+    expect(missingCallout.isOverBudget).toBe(false);
+    expect(missingCallout.showHostTether).toBe(false); // centered 72x44 does not overhang
+  });
+
+  it('allocates Tile pills and gold 0° ticks first, nudges overlapping Overlay pills cleanly with leader lines, and stays deterministic', () => {
+    const rectsOverlap = (a: CalloutBox, b: CalloutBox) =>
+      !(a.maxX <= b.minX || b.maxX <= a.minX || a.maxY <= b.minY || b.maxY <= a.minY);
+
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhdTileset.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0, // 0° tick sits at top ~(0, -80)
+        overlays: [
+          { id: 'ov-center-1', overlayPackId: awPack.id, overlayId: 'short', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-center-2', overlayPackId: awPack.id, overlayId: 'short', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-center-3', overlayPackId: awPack.id, overlayId: 'short', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-center-4', overlayPackId: awPack.id, overlayId: 'short', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          // Directly over the 0° gold orientation tick -> must nudge away from arrowRect
+          { id: 'ov-on-arrow', overlayPackId: awPack.id, overlayId: 'short', offsetX: 0, offsetY: -0.75, rotationDeg: 0 },
+          // Far right where no Tile pill or tick sits -> stays at anchor without displacement
+          { id: 'ov-clear-rim', overlayPackId: awPack.id, overlayId: 'short', offsetX: 0.95, offsetY: 0.1, rotationDeg: 0 },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: mhdTileset.id,
+        tileId: '01-02',
+        faceNumber: 2,
+        rotation: 3, // 180° tick at bottom
+        overlays: [],
+      },
+    ];
+
+    const opts = {
+      placements,
+      tilesetsById,
+      overlayPacksById,
+      getOverlayPixelSize: () => ({ width: 120, height: 120 }),
+    };
+    const layoutA = layoutAssemblyCallouts(opts);
+    const layoutB = layoutAssemblyCallouts(opts);
+    expect(layoutA).toEqual(layoutB);
+
+    // Tile pills stay strictly at hex centers
+    const host0Center = axialToWorld(0, 0, HEX_RADIUS);
+    expect(layoutA.tileCallouts[0].centerX).toBeCloseTo(host0Center.x, 8);
+    expect(layoutA.tileCallouts[0].centerY).toBeCloseTo(host0Center.y, 8);
+
+    // No Overlay pill overlaps any Tile pill, any Tile 0° arrow, or any other Overlay pill
+    const fixedObstacles: CalloutBox[] = layoutA.tileCallouts.flatMap((t) => [
+      t.pillRect,
+      t.arrowRect,
+    ]);
+    for (let i = 0; i < layoutA.overlayCallouts.length; i++) {
+      const ovA = layoutA.overlayCallouts[i];
+      for (const obs of fixedObstacles) {
+        expect(rectsOverlap(ovA.pillRect, obs)).toBe(false);
+      }
+      for (let j = i + 1; j < layoutA.overlayCallouts.length; j++) {
+        expect(rectsOverlap(ovA.pillRect, layoutA.overlayCallouts[j].pillRect)).toBe(false);
+      }
+    }
+
+    const centered1 = layoutA.overlayCallouts.find((c) => c.id === 'ov-center-1')!;
+    expect(centered1.displaced).toBe(true);
+    expect(centered1.leaderStart).toEqual({ x: centered1.anchorX, y: centered1.anchorY });
+    // Leader end must touch the pillRect boundary
+    expect(centered1.leaderEnd.x).toBeGreaterThanOrEqual(centered1.pillRect.minX - 1e-9);
+    expect(centered1.leaderEnd.x).toBeLessThanOrEqual(centered1.pillRect.maxX + 1e-9);
+    expect(centered1.leaderEnd.y).toBeGreaterThanOrEqual(centered1.pillRect.minY - 1e-9);
+    expect(centered1.leaderEnd.y).toBeLessThanOrEqual(centered1.pillRect.maxY + 1e-9);
+
+    const onArrow = layoutA.overlayCallouts.find((c) => c.id === 'ov-on-arrow')!;
+    expect(onArrow.displaced).toBe(true);
+
+    const clearRim = layoutA.overlayCallouts.find((c) => c.id === 'ov-clear-rim')!;
+    expect(clearRim.displaced).toBe(false);
+    expect(clearRim.pillX).toBeCloseTo(clearRim.anchorX, 8);
+    expect(clearRim.pillY).toBeCloseTo(clearRim.anchorY, 8);
+
+    const unionBounds = getCalloutLayoutBounds(layoutA)!;
+    expect(unionBounds).not.toBeNull();
+    expect(unionBounds.minX).toBeLessThanOrEqual(layoutA.tileCallouts[0].pillRect.minX);
+    expect(unionBounds.maxX).toBeGreaterThanOrEqual(clearRim.pillRect.maxX);
+  });
+
+  it('computes a focus pan target camera only when the target lies outside viewport safe margins', () => {
+    const cam = { x: 0, y: 0, zoom: 1.5 };
+    // Inside 1000x800 viewport with 64px margin -> no pan needed
+    expect(computePanToFocusCamera(cam, 50, -40, 1000, 800, 64)).toBeNull();
+
+    // Off-screen to the right (50 + 400*1.5 = 650 away from center -> screenX = 1150 > 1000 - 64)
+    const pan = computePanToFocusCamera(cam, 400, -120, 1000, 800, 64);
+    expect(pan).toEqual({ x: 400, y: -120, zoom: 1.5 });
+
+    // Near edge within margin (screenX = 500 + 300*1.5 = 950 > 936) -> pans to center
+    expect(computePanToFocusCamera(cam, 300, 0, 1000, 800, 64)).toEqual({ x: 300, y: 0, zoom: 1.5 });
+
+    // Degenerate viewport -> null
+    expect(computePanToFocusCamera(cam, 400, -120, 0, 0, 64)).toBeNull();
   });
 });

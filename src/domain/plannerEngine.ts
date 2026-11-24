@@ -1,4 +1,10 @@
-import { axialKey, clampOffsetToUnitHex, normalizeRotationDeg } from './hexGeometry';
+import {
+  HEX_RADIUS,
+  axialKey,
+  axialToWorld,
+  clampOffsetToUnitHex,
+  normalizeRotationDeg,
+} from './hexGeometry';
 import {
   overlayLocalToWorld,
   reprojectOverlayToHost,
@@ -1055,12 +1061,14 @@ export interface PullListFaceUsage {
   faceNumber: number;
   label: string;
   count: number;
+  url: string;
 }
 
 export interface PullListItem {
   tileId: string;
   displayLabel: string;
   isSymmetric: boolean;
+  thumbnailUrl: string;
   needed: number;
   owned: number;
   isOverBudget: boolean;
@@ -1076,6 +1084,26 @@ export interface PullListGroup {
   items: PullListItem[];
 }
 
+export interface OverlayPullListItem {
+  overlayPackId: string;
+  overlayId: string;
+  label: string;
+  url: string;
+  needed: number;
+  owned: number;
+  isOverBudget: boolean;
+}
+
+export interface OverlayPullListGroup {
+  overlayPackId: string;
+  packName: string;
+  shortCode: string;
+  pairedTilesetId: string | null;
+  owned: number;
+  totalNeeded: number;
+  items: OverlayPullListItem[];
+}
+
 export interface MissingPullListEntry {
   tilesetId: string;
   tileId: string;
@@ -1084,11 +1112,53 @@ export interface MissingPullListEntry {
   count: number;
 }
 
+export interface MissingOverlayPullListEntry {
+  overlayPackId: string;
+  overlayId: string;
+  count: number;
+}
+
+export interface PullListByTileOverlay {
+  id: string;
+  overlayPackId: string;
+  overlayId: string;
+  shortCode: string;
+  label: string;
+  url: string | null;
+  stackIndex: number;
+  stackCount: number;
+  isOverBudget: boolean;
+  isMissing: boolean;
+}
+
+export interface PullListByTileHost {
+  q: number;
+  r: number;
+  worldX: number;
+  worldY: number;
+  displayLabel: string;
+  covered: boolean;
+  isMissingHost: boolean;
+  overlays: PullListByTileOverlay[];
+}
+
 export interface PullListSummary {
   totalPlacements: number;
+  totalOverlays: number;
   groups: PullListGroup[];
+  overlayGroups: OverlayPullListGroup[];
+  byTile: PullListByTileHost[];
   missing: MissingPullListEntry[];
+  missingOverlays: MissingOverlayPullListEntry[];
 }
+
+export type PullListHighlight =
+  | { kind: 'tile-group'; tilesetId: string; tileId: string }
+  | { kind: 'overlay-group'; overlayPackId: string; overlayId: string }
+  | { kind: 'missing-tile'; tilesetId: string; tileId: string; faceNumber: number }
+  | { kind: 'missing-overlay'; overlayPackId: string; overlayId: string }
+  | { kind: 'host-placement'; coord: AxialCoord }
+  | { kind: 'overlay-placement'; overlayId: string };
 
 export function formatAssemblyLabel(
   placement: Pick<Placement, 'tilesetId' | 'faceNumber'>,
@@ -1121,10 +1191,15 @@ export function computePullList(
   placements: readonly Placement[],
   tilesets: readonly Tileset[],
   collection: Collection,
+  overlayPacks: readonly OverlayPack[] = [],
 ): PullListSummary {
   const tilesetsById = new Map<string, Tileset>(tilesets.map((t) => [t.id, t]));
+  const overlayPacksById = new Map<string, OverlayPack>(overlayPacks.map((p) => [p.id, p]));
   const tileFaceCounts = new Map<string, Map<number, number>>();
+  const overlayCounts = new Map<string, number>();
   const missingCounts = new Map<string, MissingPullListEntry>();
+  const missingOverlayCounts = new Map<string, MissingOverlayPullListEntry>();
+  let totalOverlays = 0;
 
   for (const p of placements) {
     const resolved = resolvePlacementAsset(p, tilesetsById);
@@ -1142,16 +1217,36 @@ export function computePullList(
           count: 1,
         });
       }
-      continue;
+    } else {
+      const key = tileCollectionKey(p.tilesetId, resolved.tile.tileId);
+      let faceMap = tileFaceCounts.get(key);
+      if (!faceMap) {
+        faceMap = new Map<number, number>();
+        tileFaceCounts.set(key, faceMap);
+      }
+      faceMap.set(p.faceNumber, (faceMap.get(p.faceNumber) ?? 0) + 1);
     }
 
-    const key = tileCollectionKey(p.tilesetId, resolved.tile.tileId);
-    let faceMap = tileFaceCounts.get(key);
-    if (!faceMap) {
-      faceMap = new Map<number, number>();
-      tileFaceCounts.set(key, faceMap);
+    for (const ov of p.overlays ?? []) {
+      totalOverlays += 1;
+      const resolvedOv = resolveOverlayAsset(ov, overlayPacksById);
+      if (resolvedOv.status === 'ok') {
+        const ovKey = overlayCollectionKey(ov.overlayPackId, resolvedOv.overlay.overlayId);
+        overlayCounts.set(ovKey, (overlayCounts.get(ovKey) ?? 0) + 1);
+      } else {
+        const mOvKey = `${ov.overlayPackId}:${ov.overlayId}`;
+        const existing = missingOverlayCounts.get(mOvKey);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          missingOverlayCounts.set(mOvKey, {
+            overlayPackId: ov.overlayPackId,
+            overlayId: ov.overlayId,
+            count: 1,
+          });
+        }
+      }
     }
-    faceMap.set(p.faceNumber, (faceMap.get(p.faceNumber) ?? 0) + 1);
   }
 
   const groups: PullListGroup[] = [];
@@ -1170,7 +1265,7 @@ export function computePullList(
       for (const f of orderedFaces) {
         const count = faceMap.get(f.faceNumber) ?? 0;
         if (count > 0) {
-          faces.push({ faceNumber: f.faceNumber, label: f.label, count });
+          faces.push({ faceNumber: f.faceNumber, label: f.label, count, url: f.url });
           needed += count;
         }
       }
@@ -1181,6 +1276,7 @@ export function computePullList(
           tileId: tile.tileId,
           displayLabel: tile.isSymmetric ? `#${tile.faceA.label}` : `${tile.faceA.label}/${tile.faceB.label}`,
           isSymmetric: tile.isSymmetric,
+          thumbnailUrl: faces[0]?.url ?? tile.faceA.url,
           needed,
           owned,
           isOverBudget: needed > owned,
@@ -1201,35 +1297,206 @@ export function computePullList(
     }
   }
 
+  const overlayGroups: OverlayPullListGroup[] = [];
+  const orderedOverlayPacks = sortOverlayPacksPairedFirst(overlayPacks, tilesets);
+  for (const pack of orderedOverlayPacks) {
+    const owned = collection.overlayPacks[pack.id] ?? DEFAULT_OVERLAY_PACK_COPIES;
+    const items: OverlayPullListItem[] = [];
+    let totalNeeded = 0;
+
+    const sortedOverlays = [...pack.overlays].sort(
+      (a, b) => naturalCompareLabels(a.label, b.label) || a.overlayId.localeCompare(b.overlayId),
+    );
+    for (const overlay of sortedOverlays) {
+      const needed = overlayCounts.get(overlayCollectionKey(pack.id, overlay.overlayId)) ?? 0;
+      if (needed <= 0) continue;
+      totalNeeded += needed;
+      items.push({
+        overlayPackId: pack.id,
+        overlayId: overlay.overlayId,
+        label: overlay.label,
+        url: overlay.url,
+        needed,
+        owned,
+        isOverBudget: needed > owned,
+      });
+    }
+
+    if (items.length > 0) {
+      overlayGroups.push({
+        overlayPackId: pack.id,
+        packName: pack.name,
+        shortCode: pack.shortCode,
+        pairedTilesetId: pack.pairedTilesetId,
+        owned,
+        totalNeeded,
+        items,
+      });
+    }
+  }
+
   const missing = Array.from(missingCounts.values()).sort(
     (a, b) => a.tilesetId.localeCompare(b.tilesetId) || a.faceNumber - b.faceNumber,
   );
+  const missingOverlays = Array.from(missingOverlayCounts.values()).sort(
+    (a, b) =>
+      a.overlayPackId.localeCompare(b.overlayPackId) ||
+      naturalCompareLabels(a.overlayId, b.overlayId),
+  );
+
+  const byTile: PullListByTileHost[] = [];
+  for (const host of placements) {
+    const hostOverlays = host.overlays ?? [];
+    if (hostOverlays.length === 0) continue;
+
+    const { x: worldX, y: worldY } = axialToWorld(host.q, host.r, HEX_RADIUS);
+    const resolvedHost = resolvePlacementAsset(host, tilesetsById);
+    const overlaysTopToBottom: PullListByTileOverlay[] = [];
+
+    for (let idx = hostOverlays.length - 1; idx >= 0; idx--) {
+      const ov = hostOverlays[idx];
+      const resolvedOv = resolveOverlayAsset(ov, overlayPacksById);
+      if (resolvedOv.status === 'ok') {
+        const owned =
+          collection.overlayPacks[ov.overlayPackId] ?? DEFAULT_OVERLAY_PACK_COPIES;
+        const needed =
+          overlayCounts.get(overlayCollectionKey(ov.overlayPackId, resolvedOv.overlay.overlayId)) ??
+          0;
+        overlaysTopToBottom.push({
+          id: ov.id,
+          overlayPackId: ov.overlayPackId,
+          overlayId: ov.overlayId,
+          shortCode: resolvedOv.shortCode,
+          label: resolvedOv.overlay.label,
+          url: resolvedOv.url,
+          stackIndex: idx,
+          stackCount: hostOverlays.length,
+          isOverBudget: needed > owned,
+          isMissing: false,
+        });
+      } else {
+        overlaysTopToBottom.push({
+          id: ov.id,
+          overlayPackId: ov.overlayPackId,
+          overlayId: ov.overlayId,
+          shortCode: resolvedOv.shortCode ?? `?${ov.overlayPackId}`,
+          label: ov.overlayId,
+          url: null,
+          stackIndex: idx,
+          stackCount: hostOverlays.length,
+          isOverBudget: false,
+          isMissing: true,
+        });
+      }
+    }
+
+    byTile.push({
+      q: host.q === 0 ? 0 : host.q,
+      r: host.r === 0 ? 0 : host.r,
+      worldX,
+      worldY,
+      displayLabel: formatAssemblyLabel(host, tilesetsById),
+      covered: Boolean(host.covered),
+      isMissingHost: resolvedHost.status !== 'ok',
+      overlays: overlaysTopToBottom,
+    });
+  }
+
+  byTile.sort((a, b) => {
+    const dy = a.worldY - b.worldY;
+    if (Math.abs(dy) > 1e-6) return dy;
+    const dx = a.worldX - b.worldX;
+    if (Math.abs(dx) > 1e-6) return dx;
+    return a.q - b.q || a.r - b.r;
+  });
 
   return {
     totalPlacements: placements.length,
+    totalOverlays,
     groups,
+    overlayGroups,
+    byTile,
     missing,
+    missingOverlays,
   };
 }
 
 export function formatPullListText(mapName: string, pullList: PullListSummary): string {
-  const lines: string[] = [`${mapName} — Pull List (${pullList.totalPlacements} Placements)`];
+  const lines: string[] = [
+    `${mapName} — Pull List (${formatMapSummaryCounts(pullList.totalPlacements, pullList.totalOverlays)})`,
+  ];
 
-  for (const group of pullList.groups) {
+  if (pullList.groups.length > 0) {
     lines.push('');
-    lines.push(`${group.tilesetName} (${group.shortCode}) — ${group.totalNeeded} tiles (${group.owned} owned copies)`);
-    for (const item of group.items) {
-      const faceDetails = item.faces.map((f) => `#${f.label} x${f.count}`).join(', ');
-      const warn = item.isOverBudget ? ` [OVER BUDGET: own ${item.owned}]` : '';
-      lines.push(`  - Tile ${item.displayLabel} x${item.needed} (${faceDetails})${warn}`);
+    lines.push('Tiles');
+    for (const group of pullList.groups) {
+      lines.push(
+        `${group.tilesetName} (${group.shortCode}) — ${group.totalNeeded} tiles (${group.owned} owned copies)`,
+      );
+      for (const item of group.items) {
+        const faceDetails = item.faces.map((f) => `#${f.label} x${f.count}`).join(', ');
+        const warn = item.isOverBudget ? ` [OVER BUDGET: own ${item.owned}]` : '';
+        lines.push(`  - Tile ${item.displayLabel} x${item.needed} (${faceDetails})${warn}`);
+      }
     }
   }
 
-  if (pullList.missing.length > 0) {
+  if (pullList.totalOverlays > 0 && pullList.overlayGroups.length > 0) {
+    lines.push('');
+    lines.push('Overlays');
+    for (const group of pullList.overlayGroups) {
+      lines.push(
+        `${group.packName} (${group.shortCode}) — ${group.totalNeeded} overlays (${group.owned} owned copies)`,
+      );
+      for (const item of group.items) {
+        const warn = item.isOverBudget ? ` [OVER BUDGET: own ${item.owned}]` : '';
+        lines.push(`  - ${item.label} x${item.needed}${warn}`);
+      }
+    }
+  }
+
+  if (pullList.byTile.length > 0) {
+    lines.push('');
+    lines.push('Tile -> Overlay Assembly');
+    for (const host of pullList.byTile) {
+      const aggregated = new Map<
+        string,
+        { shortCode: string; label: string; count: number; isMissing: boolean }
+      >();
+      // host.overlays is already in top-to-bottom stack order; Map preserves first-seen order
+      for (const ov of host.overlays) {
+        const key = `${ov.overlayPackId}:${ov.overlayId}`;
+        const existing = aggregated.get(key);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          aggregated.set(key, {
+            shortCode: ov.shortCode,
+            label: ov.label,
+            count: 1,
+            isMissing: ov.isMissing,
+          });
+        }
+      }
+      const itemsText = Array.from(aggregated.values())
+        .map(
+          (entry) =>
+            `[${entry.shortCode}] ${entry.label} x${entry.count}${entry.isMissing ? ' [MISSING]' : ''}`,
+        )
+        .join(', ');
+      const fogTag = host.covered ? ' [Fog]' : '';
+      lines.push(`  - ${host.displayLabel} (${host.q}, ${host.r})${fogTag}: ${itemsText}`);
+    }
+  }
+
+  if (pullList.missing.length > 0 || pullList.missingOverlays.length > 0) {
     lines.push('');
     lines.push('Missing Assets');
     for (const m of pullList.missing) {
-      lines.push(`  - ${m.tilesetId} #${m.label} x${m.count}`);
+      lines.push(`  - [Tile] ${m.tilesetId} #${m.label} x${m.count}`);
+    }
+    for (const mo of pullList.missingOverlays) {
+      lines.push(`  - [Overlay] ${mo.overlayPackId} ${mo.overlayId} x${mo.count}`);
     }
   }
 
