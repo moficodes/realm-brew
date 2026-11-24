@@ -51,6 +51,7 @@ import {
   findPlacementAt,
   formatAssemblyLabel,
   resolveOverlayAsset,
+  type PullListHighlight,
 } from '../domain/plannerEngine';
 import type {
   ActiveBrush,
@@ -75,11 +76,13 @@ interface CanvasViewportProps {
   selectedCoord: AxialCoord | null;
   focusedOverlayId: string | null;
   hoveredInspectorOverlayId: string | null;
+  pullListHighlight: PullListHighlight | null;
   inspectorRotationPreview: { hostCoord: AxialCoord; overlayId: string; worldDeg: number } | null;
   rightDrawerCollapsed: boolean;
   contextMenu: OverlayContextMenuState | null;
   onContextMenuChange: (menu: OverlayContextMenuState | null) => void;
   overBudgetCoords: ReadonlySet<PlacementKey>;
+  overBudgetOverlayIds: ReadonlySet<string>;
   showGrid: boolean;
   showLabels: boolean;
   camera: Camera;
@@ -124,6 +127,7 @@ interface CanvasViewportProps {
 }
 
 const EMPTY_OVER_BUDGET_COORDS = new Set<PlacementKey>();
+const EMPTY_OVER_BUDGET_OVERLAY_IDS = new Set<string>();
 
 function displayDeg(deg: number): number {
   const rounded = Math.round(deg) % 360;
@@ -139,11 +143,13 @@ export function CanvasViewport({
   selectedCoord,
   focusedOverlayId,
   hoveredInspectorOverlayId,
+  pullListHighlight,
   inspectorRotationPreview,
   rightDrawerCollapsed,
   contextMenu,
   onContextMenuChange,
   overBudgetCoords,
+  overBudgetOverlayIds,
   showGrid,
   showLabels,
   camera,
@@ -466,8 +472,12 @@ export function CanvasViewport({
       hoveredOverlayHit: viewMode === 'gm' && !fogToolActive ? hoveredOverlayHit : null,
       hoveredInspectorOverlayId:
         viewMode === 'gm' && !fogToolActive ? hoveredInspectorOverlayId : null,
+      pullListHighlight: viewMode === 'gm' ? pullListHighlight : null,
       activeBrush: viewMode === 'gm' && !fogToolActive ? previewBrush : null,
       overBudgetCoords: viewMode === 'gm' ? overBudgetCoords : EMPTY_OVER_BUDGET_COORDS,
+      overBudgetOverlayIds:
+        viewMode === 'gm' ? overBudgetOverlayIds : EMPTY_OVER_BUDGET_OVERLAY_IDS,
+      showOverBudgetCues: viewMode === 'gm',
       dragMove: viewMode === 'gm' && !fogToolActive ? dragMove : null,
       overlayDrag: viewMode === 'gm' && !fogToolActive ? overlayDrag : null,
       overlayRotationPreview:
@@ -491,8 +501,10 @@ export function CanvasViewport({
     focusedOverlayId,
     hoveredOverlayHit,
     hoveredInspectorOverlayId,
+    pullListHighlight,
     previewBrush,
     overBudgetCoords,
+    overBudgetOverlayIds,
     dragMove,
     overlayDrag,
     activeRotationPreview,

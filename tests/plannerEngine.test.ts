@@ -1728,3 +1728,356 @@ describe('Fog of War commands & Player View session fence (Seam 2)', () => {
     expect(gmUndo.history.present).toBe(s0);
   });
 });
+
+describe('Pull List v2: By Pack, By Tile, Missing Overlays, and Copy text (Seam 2)', () => {
+  const makeOverlayPack = (
+    id: string,
+    name: string,
+    shortCode: string,
+    pairedTilesetId: string | null,
+    labels: string[],
+  ): OverlayPack => ({
+    id,
+    name,
+    shortCode,
+    pairedTilesetId,
+    overlays: labels.map((label) => {
+      const overlayId = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      return {
+        overlayId,
+        overlayPackId: id,
+        label,
+        filename: `${label}.png`,
+        url: `/api/overlay-assets/${id}/${encodeURIComponent(label)}.png`,
+      };
+    }),
+  });
+
+  it('groups placed Overlays By Pack in paired-first order, natural-sorts items, flags over-budget, omits 0-placed packs, and includes covered Fog hosts', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const uc = makeTestTileset('underdark-caverns', 'UC');
+    const packAw = makeOverlayPack('alchemists-workshop', "Alchemists' Workshop", 'AW', null, [
+      'Potion Rack 10',
+      'Potion Rack 2',
+    ]);
+    const packUc = makeOverlayPack('underdark-caverns-overlays', 'Underdark Caverns Overlays', 'UC', uc.id, [
+      'Mushroom Patch',
+    ]);
+    const packMhd = makeOverlayPack('man-hewn-dungeons-overlays', 'Man Hewn Dungeons Overlays', 'MHD', mhd.id, [
+      'Door 10',
+      'Door 2',
+    ]);
+    const packUnused = makeOverlayPack('red-dragons-lair', "Red Dragon's Lair", 'RDL', null, ['Egg']);
+
+    const collection: Collection = {
+      version: 2,
+      tilesets: { [mhd.id]: 2, [uc.id]: 2 },
+      overlayPacks: {
+        [packMhd.id]: 1,
+        [packUc.id]: 0, // digital-only 0 copies -> any placed item is over-budget
+        [packAw.id]: 2,
+        [packUnused.id]: 2,
+      },
+    };
+
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        overlays: [
+          { id: 'ov-1', overlayPackId: packMhd.id, overlayId: 'door-10', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-2', overlayPackId: packMhd.id, overlayId: 'door-2', offsetX: 0.2, offsetY: 0, rotationDeg: 15 },
+          { id: 'ov-3', overlayPackId: packMhd.id, overlayId: 'door-2', offsetX: -0.2, offsetY: 0, rotationDeg: 30 },
+          { id: 'ov-4', overlayPackId: packAw.id, overlayId: 'potion-rack-10', offsetX: 0, offsetY: 0.2, rotationDeg: 0 },
+        ],
+      },
+      {
+        q: 1,
+        r: 0,
+        tilesetId: uc.id,
+        tileId: '03-04',
+        faceNumber: 3,
+        rotation: 2,
+        covered: true, // Fog of War covered Placements MUST still count in Pull List
+        overlays: [
+          { id: 'ov-5', overlayPackId: packUc.id, overlayId: 'mushroom-patch', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-6', overlayPackId: packAw.id, overlayId: 'potion-rack-2', offsetX: 0, offsetY: 0, rotationDeg: 45 },
+        ],
+      },
+    ];
+
+    // Intentionally pass overlayPacks unsorted to verify paired-first sorting (MHD, UC -> AW)
+    const pullList = computePullList(
+      placements,
+      [mhd, uc],
+      collection,
+      [packAw, packUnused, packUc, packMhd],
+    );
+
+    expect(pullList.totalPlacements).toBe(2);
+    expect(pullList.totalOverlays).toBe(6);
+    expect(pullList.overlayGroups.map((g) => g.shortCode)).toEqual(['MHD', 'UC', 'AW']);
+
+    const mhdOvGroup = pullList.overlayGroups[0];
+    expect(mhdOvGroup.totalNeeded).toBe(3);
+    expect(mhdOvGroup.owned).toBe(1);
+    expect(mhdOvGroup.items.map((i) => ({ label: i.label, needed: i.needed, isOverBudget: i.isOverBudget }))).toEqual([
+      { label: 'Door 2', needed: 2, isOverBudget: true },
+      { label: 'Door 10', needed: 1, isOverBudget: false },
+    ]);
+
+    const ucOvGroup = pullList.overlayGroups[1];
+    expect(ucOvGroup.owned).toBe(0);
+    expect(ucOvGroup.items[0]).toMatchObject({
+      label: 'Mushroom Patch',
+      needed: 1,
+      owned: 0,
+      isOverBudget: true,
+    });
+
+    const awOvGroup = pullList.overlayGroups[2];
+    expect(awOvGroup.items.map((i) => i.label)).toEqual(['Potion Rack 2', 'Potion Rack 10']);
+    expect(awOvGroup.items.every((i) => !i.isOverBudget)).toBe(true);
+  });
+
+  it('collects unresolved Overlay Placements into missingOverlays without dropping valid or covered Overlays', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const packMhd = makeOverlayPack('man-hewn-dungeons-overlays', 'Man Hewn Dungeons Overlays', 'MHD', mhd.id, [
+      'Door 2',
+    ]);
+    const collection: Collection = {
+      version: 2,
+      tilesets: { [mhd.id]: 2 },
+      overlayPacks: { [packMhd.id]: 2 },
+    };
+
+    const placements: Placement[] = [
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'lost-tileset',
+        tileId: '05-06',
+        faceNumber: 5,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          { id: 'ov-valid', overlayPackId: packMhd.id, overlayId: 'door-2', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-miss-1', overlayPackId: packMhd.id, overlayId: 'missing-door', offsetX: 0.1, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-miss-2', overlayPackId: 'ghost-pack', overlayId: 'altar', offsetX: -0.1, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-miss-3', overlayPackId: 'ghost-pack', overlayId: 'altar', offsetX: 0.2, offsetY: 0, rotationDeg: 90 },
+        ],
+      },
+    ];
+
+    const pullList = computePullList(placements, [mhd], collection, [packMhd]);
+    expect(pullList.totalPlacements).toBe(1);
+    expect(pullList.totalOverlays).toBe(4);
+    expect(pullList.missing).toEqual([
+      { tilesetId: 'lost-tileset', tileId: '05-06', faceNumber: 5, label: '05', count: 1 },
+    ]);
+    expect(pullList.missingOverlays).toEqual([
+      { overlayPackId: 'ghost-pack', overlayId: 'altar', count: 2 },
+      { overlayPackId: packMhd.id, overlayId: 'missing-door', count: 1 },
+    ]);
+    expect(pullList.overlayGroups[0].items).toHaveLength(1);
+    expect(pullList.overlayGroups[0].items[0].label).toBe('Door 2');
+  });
+
+  it('builds By Tile host cards in visual reading order (y then x) with top-to-bottom Overlay stacks, Fog badge flag, and cues', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const packMhd = makeOverlayPack('man-hewn-dungeons-overlays', 'Man Hewn Dungeons Overlays', 'MHD', mhd.id, [
+      'Bridge',
+      'Crate',
+    ]);
+    const collection: Collection = {
+      version: 2,
+      tilesets: { [mhd.id]: 2 },
+      overlayPacks: { [packMhd.id]: 1 },
+    };
+
+    const placements: Placement[] = [
+      // Bottom-right (worldY = sqrt(3)*R, worldX = 300)
+      {
+        q: 2,
+        r: 0,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 2,
+        rotation: 0,
+        overlays: [
+          { id: 'ov-br', overlayPackId: packMhd.id, overlayId: 'bridge', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+        ],
+      },
+      // Bare host with 0 overlays -> excluded from byTile
+      {
+        q: -1,
+        r: 0,
+        tilesetId: mhd.id,
+        tileId: '03-04',
+        faceNumber: 3,
+        rotation: 0,
+      },
+      // Bottom-left (same worldY = sqrt(3)*R as (2,0), worldX = 0) -> must come BEFORE (2,0)
+      {
+        q: 0,
+        r: 1,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          { id: 'ov-bot', overlayPackId: packMhd.id, overlayId: 'crate', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-mid', overlayPackId: 'missing-pack', overlayId: 'lost-prop', offsetX: 0.2, offsetY: 0, rotationDeg: 0 },
+          { id: 'ov-top', overlayPackId: packMhd.id, overlayId: 'crate', offsetX: -0.2, offsetY: 0, rotationDeg: 45 },
+        ],
+      },
+      // Top-most (worldY = -0.5*sqrt(3)*R, worldX = 150) -> must come FIRST
+      {
+        q: 1,
+        r: -1,
+        tilesetId: 'missing-ts',
+        tileId: '09-10',
+        faceNumber: 9,
+        rotation: 0,
+        overlays: [
+          { id: 'ov-topmost', overlayPackId: packMhd.id, overlayId: 'bridge', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+        ],
+      },
+    ];
+
+    const pullList = computePullList(placements, [mhd], collection, [packMhd]);
+    expect(pullList.byTile).toHaveLength(3);
+    expect(pullList.byTile.map((h) => [h.q, h.r])).toEqual([
+      [1, -1],
+      [0, 1],
+      [2, 0],
+    ]);
+
+    expect(pullList.byTile[0]).toMatchObject({
+      displayLabel: '?missing-ts #09',
+      isMissingHost: true,
+      covered: false,
+    });
+    expect(pullList.byTile[1]).toMatchObject({
+      displayLabel: 'MHD #01',
+      isMissingHost: false,
+      covered: true,
+    });
+    // Top-to-bottom stack order: index 2 -> 1 -> 0
+    expect(pullList.byTile[1].overlays.map((o) => o.id)).toEqual(['ov-top', 'ov-mid', 'ov-bot']);
+    expect(pullList.byTile[1].overlays[0]).toMatchObject({
+      shortCode: 'MHD',
+      label: 'Crate',
+      isOverBudget: true, // 2 crates needed, 1 owned
+      isMissing: false,
+      stackIndex: 2,
+      stackCount: 3,
+    });
+    expect(pullList.byTile[1].overlays[1]).toMatchObject({
+      shortCode: '?missing-pack',
+      label: 'lost-prop',
+      url: null,
+      isOverBudget: false,
+      isMissing: true,
+      stackIndex: 1,
+      stackCount: 3,
+    });
+    // Bridge is used twice across (1,-1) and (2,0) with 1 owned -> over-budget
+    expect(pullList.byTile[2].overlays[0].isOverBudget).toBe(true);
+  });
+
+  it('formats complete plain-text Copy checklist with Tiles, Overlays, Tile -> Overlay Assembly (aggregated top-to-bottom), and Missing Assets, omitting empty sections', () => {
+    const mhd = makeTestTileset('man-hewn-dungeons', 'MHD');
+    const packMhd = makeOverlayPack('man-hewn-dungeons-overlays', 'Man Hewn Dungeons Overlays', 'MHD', mhd.id, [
+      'Bridge',
+      'Crate',
+      'Torch',
+    ]);
+    const collection: Collection = {
+      version: 2,
+      tilesets: { [mhd.id]: 2 },
+      overlayPacks: { [packMhd.id]: 2 },
+    };
+
+    // Case A: 0 Overlays and 0 Missing -> omits Overlays, Tile -> Overlay Assembly, and Missing Assets
+    const tilesOnly = computePullList(
+      [{ q: 0, r: 0, tilesetId: mhd.id, tileId: '01-02', faceNumber: 1, rotation: 0 }],
+      [mhd],
+      collection,
+      [packMhd],
+    );
+    const tilesOnlyText = formatPullListText('Solo Room', tilesOnly);
+    expect(tilesOnlyText).toContain('Solo Room — Pull List (1 Tile)');
+    expect(tilesOnlyText).toContain('Tiles');
+    expect(tilesOnlyText).not.toContain('Overlays');
+    expect(tilesOnlyText).not.toContain('Tile -> Overlay Assembly');
+    expect(tilesOnlyText).not.toContain('Missing Assets');
+
+    // Case B: Full checklist with duplicate Overlays in stack, visual reading order, and missing Tile + missing Overlay
+    const placements: Placement[] = [
+      // Bottom row (q=0, r=1) -> comes SECOND in visual reading order
+      {
+        q: 0,
+        r: 1,
+        tilesetId: mhd.id,
+        tileId: '01-02',
+        faceNumber: 1,
+        rotation: 0,
+        covered: true,
+        overlays: [
+          // Stack bottom -> top: [Torch (0), Crate (1), Bridge (2), Crate (3)]
+          // Top-to-bottom first-seen order: Crate x2, Bridge x1, Torch x1
+          { id: 'b0', overlayPackId: packMhd.id, overlayId: 'torch', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+          { id: 'b1', overlayPackId: packMhd.id, overlayId: 'crate', offsetX: 0.1, offsetY: 0, rotationDeg: 0 },
+          { id: 'b2', overlayPackId: packMhd.id, overlayId: 'bridge', offsetX: 0, offsetY: 0.1, rotationDeg: 0 },
+          { id: 'b3', overlayPackId: packMhd.id, overlayId: 'crate', offsetX: -0.1, offsetY: 0, rotationDeg: 90 },
+        ],
+      },
+      // Top row (q=0, r=0) -> comes FIRST in visual reading order
+      {
+        q: 0,
+        r: 0,
+        tilesetId: 'lost-ts',
+        tileId: '07-08',
+        faceNumber: 7,
+        rotation: 0,
+        overlays: [
+          { id: 't0', overlayPackId: 'lost-pack', overlayId: 'brazier', offsetX: 0, offsetY: 0, rotationDeg: 0 },
+        ],
+      },
+    ];
+
+    const fullPull = computePullList(placements, [mhd], collection, [packMhd]);
+    const fullText = formatPullListText('Crypt Depth', fullPull);
+
+    expect(fullText).toContain('Crypt Depth — Pull List (2 Tiles · 5 Overlays)');
+    expect(fullText).toContain('\nTiles\n');
+    expect(fullText).toContain('\nOverlays\n');
+    expect(fullText).toContain('Crate x2');
+    expect(fullText).toContain('\nTile -> Overlay Assembly\n');
+    expect(fullText).toContain('\nMissing Assets\n');
+    expect(fullText).toContain('[Tile] lost-ts #07 x1');
+    expect(fullText).toContain('[Overlay] lost-pack brazier x1');
+
+    // Visual reading order: (0, 0) appears before (0, 1) in Tile -> Overlay Assembly
+    const assemblySection = fullText.split('Tile -> Overlay Assembly')[1].split('Missing Assets')[0];
+    const idxTop = assemblySection.indexOf('?lost-ts #07 (0, 0)');
+    const idxBottom = assemblySection.indexOf('MHD #01 (0, 1)');
+    expect(idxTop).toBeGreaterThan(-1);
+    expect(idxBottom).toBeGreaterThan(idxTop);
+
+    // Top-to-bottom first-seen aggregation order on (0, 1): Crate x2 before Bridge x1 before Torch x1
+    const bottomLine = assemblySection.slice(idxBottom).split('\n')[0];
+    const cratePos = bottomLine.indexOf('[MHD] Crate x2');
+    const bridgePos = bottomLine.indexOf('[MHD] Bridge x1');
+    const torchPos = bottomLine.indexOf('[MHD] Torch x1');
+    expect(cratePos).toBeGreaterThan(-1);
+    expect(bridgePos).toBeGreaterThan(cratePos);
+    expect(torchPos).toBeGreaterThan(bridgePos);
+  });
+});

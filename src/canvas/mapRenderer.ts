@@ -1,5 +1,9 @@
 import type { MapViewMode } from '../domain/fogOfWar';
 import {
+  OVERLAY_CALLOUT_HEIGHT,
+  layoutAssemblyCallouts,
+} from '../domain/calloutLayout';
+import {
   HEX_HEIGHT,
   HEX_RADIUS,
   HEX_WIDTH,
@@ -26,9 +30,9 @@ import {
 import {
   findOverlayById,
   findPlacementAt,
-  formatAssemblyLabel,
   resolveOverlayAsset,
   resolvePlacementAsset,
+  type PullListHighlight,
 } from '../domain/plannerEngine';
 import {
   padFaceNumber,
@@ -91,8 +95,11 @@ export interface ViewportRenderParams {
   focusedOverlayId?: string | null;
   hoveredOverlayHit?: OverlayHit | null;
   hoveredInspectorOverlayId?: string | null;
+  pullListHighlight?: PullListHighlight | null;
   activeBrush: ActiveBrush | null;
   overBudgetCoords: ReadonlySet<PlacementKey>;
+  overBudgetOverlayIds?: ReadonlySet<string>;
+  showOverBudgetCues?: boolean;
   dragMove: DragMovePreview | null;
   overlayDrag?: OverlayDragPreview | null;
   overlayRotationPreview?: OverlayRotationPreview | null;
@@ -698,6 +705,276 @@ function drawOverlayBrushGhost(
   ctx.restore();
 }
 
+const TILE_CALLOUT_FONT = '700 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+const OVERLAY_CALLOUT_FONT = '600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+
+function drawOverBudgetOverlayCue(
+  ctx: CanvasRenderingContext2D,
+  wx: number,
+  wy: number,
+  width: number,
+  height: number,
+  worldRad: number,
+  zoom: number,
+): void {
+  const boxW = Math.max(width, MIN_OVERLAY_HIT_SIZE);
+  const boxH = Math.max(height, MIN_OVERLAY_HIT_SIZE);
+  drawOverlayOBB(
+    ctx,
+    wx,
+    wy,
+    boxW,
+    boxH,
+    worldRad,
+    'rgba(239, 68, 68, 0.8)',
+    Math.max(1.5, 1.75 / zoom),
+    true,
+  );
+
+  // Small red `!` badge anchored at the rotated top-right corner of the OBB
+  const cos = Math.cos(worldRad);
+  const sin = Math.sin(worldRad);
+  const localX = boxW / 2;
+  const localY = -boxH / 2;
+  const badgeX = wx + localX * cos - localY * sin;
+  const badgeY = wy + localX * sin + localY * cos;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(badgeX, badgeY, 7.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#dc2626';
+  ctx.fill();
+  ctx.strokeStyle = '#161412';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('!', badgeX, badgeY + 0.5);
+  ctx.restore();
+}
+
+function drawPullListHighlightPass(params: {
+  ctx: CanvasRenderingContext2D;
+  placements: readonly Placement[];
+  tilesetsById: ReadonlyMap<string, Tileset>;
+  overlayPacksById: ReadonlyMap<string, OverlayPack>;
+  imageCache: ImageLookup;
+  highlight: PullListHighlight;
+  zoom: number;
+  dragMove: DragMovePreview | null;
+}): void {
+  const {
+    ctx,
+    placements,
+    tilesetsById,
+    overlayPacksById,
+    imageCache,
+    highlight,
+    zoom,
+    dragMove,
+  } = params;
+
+  for (const host of placements) {
+    const isDragOrigin =
+      dragMove !== null && host.q === dragMove.from.q && host.r === dragMove.from.r;
+    if (isDragOrigin) continue;
+
+    if (
+      highlight.kind === 'tile-group' ||
+      highlight.kind === 'missing-tile' ||
+      highlight.kind === 'host-placement'
+    ) {
+      let match = false;
+      if (highlight.kind === 'host-placement') {
+        match = host.q === highlight.coord.q && host.r === highlight.coord.r;
+      } else if (highlight.kind === 'missing-tile') {
+        match =
+          host.tilesetId === highlight.tilesetId &&
+          host.tileId === highlight.tileId &&
+          host.faceNumber === highlight.faceNumber;
+      } else {
+        const resolved = resolvePlacementAsset(host, tilesetsById);
+        match =
+          host.tilesetId === highlight.tilesetId &&
+          (resolved.status === 'ok'
+            ? resolved.tile.tileId === highlight.tileId
+            : host.tileId === highlight.tileId);
+      }
+
+      if (match) {
+        const { x, y } = axialToWorld(host.q, host.r, HEX_RADIUS);
+        ctx.save();
+        traceHexPath(ctx, x, y, HEX_RADIUS - 2);
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.16)';
+        ctx.fill();
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = Math.max(3, 3.5 / zoom);
+        ctx.stroke();
+        ctx.restore();
+      }
+      continue;
+    }
+
+    for (const ov of host.overlays ?? []) {
+      let match = false;
+      if (highlight.kind === 'overlay-placement') {
+        match = ov.id === highlight.overlayId;
+      } else {
+        match =
+          ov.overlayPackId === highlight.overlayPackId &&
+          ov.overlayId === highlight.overlayId;
+      }
+      if (!match) continue;
+
+      const t = overlayLocalToWorld(host, ov);
+      const { width: ow, height: oh } = resolveOverlayRenderWorldSize(
+        ov,
+        overlayPacksById,
+        imageCache,
+      );
+      drawOverlayOBB(ctx, t.x, t.y, ow, oh, t.worldRad, '#fbbf24', Math.max(2, 2.5 / zoom), true);
+    }
+  }
+}
+
+/** Pass 5: Render deterministic Tile + Overlay world-space Assembly Callouts and overhang tethers. */
+export function drawAssemblyCalloutsPass(params: {
+  ctx: CanvasRenderingContext2D;
+  placements: readonly Placement[];
+  tilesetsById: ReadonlyMap<string, Tileset>;
+  overlayPacksById: ReadonlyMap<string, OverlayPack>;
+  imageCache: ImageLookup;
+  overBudgetCoords?: ReadonlySet<PlacementKey>;
+  overBudgetOverlayIds?: ReadonlySet<string>;
+  skipHostCoord?: AxialCoord | null;
+  skipOverlayId?: string | null;
+  hiddenHostCoords?: ReadonlySet<PlacementKey>;
+}): void {
+  const {
+    ctx,
+    placements,
+    tilesetsById,
+    overlayPacksById,
+    imageCache,
+    overBudgetCoords,
+    overBudgetOverlayIds,
+    skipHostCoord = null,
+    skipOverlayId = null,
+    hiddenHostCoords,
+  } = params;
+
+  const measureText = (text: string, variant: 'tile' | 'overlay'): number => {
+    ctx.font = variant === 'tile' ? TILE_CALLOUT_FONT : OVERLAY_CALLOUT_FONT;
+    return ctx.measureText(text).width;
+  };
+
+  const getOverlayPixelSize = (ov: OverlayPlacement) => {
+    const asset = resolveOverlayAsset(ov, overlayPacksById);
+    if (asset.status !== 'ok' || imageCache.isError(asset.url)) {
+      return null;
+    }
+    const img = imageCache.get(asset.url);
+    if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+      return null;
+    }
+    return { width: img.naturalWidth, height: img.naturalHeight };
+  };
+
+  const layout = layoutAssemblyCallouts({
+    placements,
+    tilesetsById,
+    overlayPacksById,
+    overBudgetCoords,
+    overBudgetOverlayIds,
+    getOverlayPixelSize,
+    skipHostCoord,
+    skipOverlayId,
+    hiddenHostCoords,
+    measureText,
+  });
+
+  // 5a: Subtle amber dashed host tethers only for overhanging Overlays
+  for (const ov of layout.overlayCallouts) {
+    if (!ov.showHostTether) continue;
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(ov.hostCenterX, ov.hostCenterY);
+    ctx.lineTo(ov.anchorX, ov.anchorY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.78)';
+    ctx.beginPath();
+    ctx.arc(ov.anchorX, ov.anchorY, 2.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 5b: Thin cyan leader lines connecting displaced Overlay pills back to their anchor
+  for (const ov of layout.overlayCallouts) {
+    if (!ov.displaced) continue;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.78)';
+    ctx.lineWidth = 1.15;
+    ctx.beginPath();
+    ctx.moveTo(ov.leaderStart.x, ov.leaderStart.y);
+    ctx.lineTo(ov.leaderEnd.x, ov.leaderEnd.y);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.85)';
+    ctx.beginPath();
+    ctx.arc(ov.anchorX, ov.anchorY, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 5c: Host Tile pills & gold 0° orientation arrows
+  for (const tile of layout.tileCallouts) {
+    drawAssemblyLabel(
+      ctx,
+      tile.centerX,
+      tile.centerY,
+      tile.rotation,
+      tile.label,
+      tile.isOverBudget,
+    );
+  }
+
+  // 5d: World-space Overlay Placement pills (no orientation tick)
+  for (const ov of layout.overlayCallouts) {
+    const rx = ov.pillX - ov.pillWidth / 2;
+    const ry = ov.pillY - OVERLAY_CALLOUT_HEIGHT / 2;
+
+    ctx.save();
+    drawRoundedRect(ctx, rx, ry, ov.pillWidth, OVERLAY_CALLOUT_HEIGHT, 4.5);
+    if (ov.isOverBudget) {
+      ctx.fillStyle = 'rgba(69, 10, 10, 0.90)';
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.92)';
+    } else if (ov.isMissing) {
+      ctx.fillStyle = 'rgba(41, 28, 14, 0.90)';
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.85)';
+    } else {
+      ctx.fillStyle = 'rgba(12, 34, 48, 0.90)';
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.80)';
+    }
+    ctx.fill();
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.font = OVERLAY_CALLOUT_FONT;
+    ctx.fillStyle = ov.isOverBudget ? '#fecaca' : ov.isMissing ? '#fde68a' : '#bae6fd';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ov.label, ov.pillX, ov.pillY + 0.5);
+    ctx.restore();
+  }
+}
+
 export function renderMapViewport({
   ctx,
   width,
@@ -715,8 +992,11 @@ export function renderMapViewport({
   focusedOverlayId = null,
   hoveredOverlayHit = null,
   hoveredInspectorOverlayId = null,
+  pullListHighlight = null,
   activeBrush,
   overBudgetCoords,
+  overBudgetOverlayIds = new Set<string>(),
+  showOverBudgetCues = true,
   dragMove,
   overlayDrag = null,
   overlayRotationPreview = null,
@@ -746,7 +1026,9 @@ export function renderMapViewport({
       placement.q === dragMove.from.q &&
       placement.r === dragMove.from.r;
     const isOverBudget =
-      viewMode === 'gm' && overBudgetCoords.has(axialKey(placement.q, placement.r));
+      viewMode === 'gm' &&
+      showOverBudgetCues &&
+      overBudgetCoords.has(axialKey(placement.q, placement.r));
     const { x, y } = axialToWorld(placement.q, placement.r, HEX_RADIUS);
 
     drawPlacementGraphic(
@@ -805,6 +1087,46 @@ export function renderMapViewport({
     zoom: camera.zoom,
     dragMove: viewMode === 'gm' ? dragMove : null,
   });
+
+  // GM over-budget Overlay cues when Labels is OFF (subtle red dashed rotated OBB + small red `!` badge)
+  if (viewMode === 'gm' && !showLabels && showOverBudgetCues && overBudgetOverlayIds.size > 0) {
+    for (const host of placements) {
+      const isDragOrigin =
+        dragMove !== null && host.q === dragMove.from.q && host.r === dragMove.from.r;
+      if (isDragOrigin) continue;
+
+      for (const ov of host.overlays ?? []) {
+        if (overlayDrag && overlayDrag.overlayId === ov.id) continue;
+        if (!overBudgetOverlayIds.has(ov.id)) continue;
+
+        const t = overlayLocalToWorld(host, ov);
+        const worldRad =
+          overlayRotationPreview && overlayRotationPreview.overlayId === ov.id
+            ? (overlayRotationPreview.worldDeg * Math.PI) / 180
+            : t.worldRad;
+        const { width: ow, height: oh } = resolveOverlayRenderWorldSize(
+          ov,
+          overlayPacksById,
+          imageCache,
+        );
+        drawOverBudgetOverlayCue(ctx, t.x, t.y, ow, oh, worldRad, camera.zoom);
+      }
+    }
+  }
+
+  // Pull List hover cross-highlighting (By Pack multi-piece or By Tile single piece, GM View only)
+  if (viewMode === 'gm' && pullListHighlight && !overlayDrag && !dragMove) {
+    drawPullListHighlightPass({
+      ctx,
+      placements,
+      tilesetsById,
+      overlayPacksById,
+      imageCache,
+      highlight: pullListHighlight,
+      zoom: camera.zoom,
+      dragMove,
+    });
+  }
 
   if (viewMode === 'gm' && !fogToolActive) {
     // Selected host Placement amber outline (drawn above Pass 4 so covered selected Placements stay crisp)
@@ -1075,24 +1397,17 @@ export function renderMapViewport({
 
   // Pass 5: Assembly Labels above Tiles, Overlays, and Pass 4 Fog covers (GM View only)
   if (showLabels && viewMode === 'gm') {
-    for (const placement of placements) {
-      const isDragOrigin =
-        dragMove !== null &&
-        placement.q === dragMove.from.q &&
-        placement.r === dragMove.from.r;
-      if (isDragOrigin) continue;
-
-      const isOverBudget = overBudgetCoords.has(axialKey(placement.q, placement.r));
-      const { x, y } = axialToWorld(placement.q, placement.r, HEX_RADIUS);
-      drawAssemblyLabel(
-        ctx,
-        x,
-        y,
-        placement.rotation,
-        formatAssemblyLabel(placement, tilesetsById),
-        isOverBudget,
-      );
-    }
+    drawAssemblyCalloutsPass({
+      ctx,
+      placements,
+      tilesetsById,
+      overlayPacksById,
+      imageCache,
+      overBudgetCoords: showOverBudgetCues ? overBudgetCoords : undefined,
+      overBudgetOverlayIds: showOverBudgetCues ? overBudgetOverlayIds : undefined,
+      skipHostCoord: dragMove?.from ?? null,
+      skipOverlayId: overlayDrag?.overlayId ?? null,
+    });
   }
 
   ctx.restore();

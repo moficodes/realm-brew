@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, ClipboardList, Layers } from 'lucide-react';
-import type { PullListSummary } from '../domain/plannerEngine';
+import type { PullListHighlight, PullListSummary } from '../domain/plannerEngine';
 import type { AxialCoord, OverlayPack, Placement, Tileset } from '../domain/types';
 import { HostInspectorPanel } from './HostInspectorPanel';
 import { PullListPanel } from './PullListPanel';
@@ -22,6 +22,9 @@ interface RightDrawerProps {
   onSelectHostCoord: (coord: AxialCoord) => void;
   onFocusOverlayId: (overlayId: string | null) => void;
   onHoverOverlayId: (overlayId: string | null) => void;
+  onHoverPullListHighlight: (highlight: PullListHighlight | null) => void;
+  onFocusPullListHost: (coord: AxialCoord) => void;
+  onFocusPullListOverlay: (hostCoord: AxialCoord, overlayId: string) => void;
   onRotateHost: (coord: AxialCoord, delta: 1 | -1) => void;
   onFlipHost: (coord: AxialCoord) => void;
   onToggleHostFog: (coord: AxialCoord) => void;
@@ -52,6 +55,9 @@ export function RightDrawer({
   onSelectHostCoord,
   onFocusOverlayId,
   onHoverOverlayId,
+  onHoverPullListHighlight,
+  onFocusPullListHost,
+  onFocusPullListOverlay,
   onRotateHost,
   onFlipHost,
   onToggleHostFog,
@@ -181,7 +187,13 @@ export function RightDrawer({
           onPreviewOverlayRotation={onPreviewOverlayRotation}
         />
       ) : (
-        <PullListPanel mapName={mapName} pullList={pullList} />
+        <PullListPanel
+          mapName={mapName}
+          pullList={pullList}
+          onHoverHighlight={onHoverPullListHighlight}
+          onFocusHost={onFocusPullListHost}
+          onFocusOverlay={onFocusPullListOverlay}
+        />
       )}
     </aside>
   );

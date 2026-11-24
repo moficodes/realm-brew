@@ -21,11 +21,15 @@ import { TilePalette, type PaletteTab } from './components/TilePalette';
 import { Toolbar } from './components/Toolbar';
 import {
   DEFAULT_CAMERA,
+  HEX_RADIUS,
+  axialToWorld,
   clampZoom,
   computeFitCamera,
+  computePanToFocusCamera,
   normalizeRotationDeg,
   type Camera,
 } from './domain/hexGeometry';
+import { overlayLocalToWorld } from './domain/overlayGeometry';
 import {
   applyFogStroke,
   attachOverlayAtWorld,
@@ -67,6 +71,7 @@ import {
   type HistoryState,
   type MapViewMode,
   type PlayerViewFence,
+  type PullListHighlight,
 } from './domain/plannerEngine';
 import type {
   ActiveBrush,
@@ -112,6 +117,7 @@ export function App() {
   const [selectedCoord, setSelectedCoord] = useState<AxialCoord | null>(null);
   const [focusedOverlayId, setFocusedOverlayId] = useState<string | null>(null);
   const [hoveredInspectorOverlayId, setHoveredInspectorOverlayId] = useState<string | null>(null);
+  const [pullListHighlight, setPullListHighlight] = useState<PullListHighlight | null>(null);
   const [inspectorRotationPreview, setInspectorRotationPreview] = useState<{
     hostCoord: AxialCoord;
     overlayId: string;
@@ -153,6 +159,11 @@ export function App() {
   contextMenuRef.current = contextMenu;
   const activeBrushRef = useRef(activeBrush);
   activeBrushRef.current = activeBrush;
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
+  const viewportSizeRef = useRef(viewportSize);
+  viewportSizeRef.current = viewportSize;
+  const panAnimFrameRef = useRef<number | null>(null);
   const collectionSaveSeqRef = useRef(0);
 
   const saveTimerRef = useRef<number | null>(null);
@@ -240,6 +251,9 @@ export function App() {
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
       }
+      if (panAnimFrameRef.current !== null) {
+        window.cancelAnimationFrame(panAnimFrameRef.current);
+      }
     };
   }, []);
 
@@ -284,8 +298,8 @@ export function App() {
   }, [collectionUsage]);
 
   const pullList = useMemo(
-    () => computePullList(placements, tilesets, collection),
-    [placements, tilesets, collection],
+    () => computePullList(placements, tilesets, collection, overlayPacks),
+    [placements, tilesets, collection, overlayPacks],
   );
 
   const selectedHost = useMemo(
@@ -334,9 +348,14 @@ export function App() {
       setSelectedCoord(null);
       setFocusedOverlayId(null);
       setHoveredInspectorOverlayId(null);
+      setPullListHighlight(null);
       setInspectorRotationPreview(null);
       setContextMenu(null);
       setSaveStatus('saved');
+      if (panAnimFrameRef.current !== null) {
+        window.cancelAnimationFrame(panAnimFrameRef.current);
+        panAnimFrameRef.current = null;
+      }
       setCamera(
         doc.placements.length > 0
           ? computeFitCamera(doc.placements, viewportSize.width, viewportSize.height, 56)
@@ -776,6 +795,7 @@ export function App() {
         setSelectedCoord(null);
         setFocusedOverlayId(null);
         setHoveredInspectorOverlayId(null);
+        setPullListHighlight(null);
         setInspectorRotationPreview(null);
         setContextMenu(null);
       }
@@ -796,12 +816,17 @@ export function App() {
       setSelectedCoord(null);
       setFocusedOverlayId(null);
       setHoveredInspectorOverlayId(null);
+      setPullListHighlight(null);
       setInspectorRotationPreview(null);
       setContextMenu(null);
       setCollectionDialogOpen(false);
       setPngExportOpen(false);
       setClearConfirmOpen(false);
       setDeleteMapConfirmOpen(false);
+      if (panAnimFrameRef.current !== null) {
+        window.cancelAnimationFrame(panAnimFrameRef.current);
+        panAnimFrameRef.current = null;
+      }
       viewModeRef.current = 'player';
       setViewMode('player');
       return;
@@ -870,6 +895,7 @@ export function App() {
     setSelectedCoord(null);
     setFocusedOverlayId(null);
     setHoveredInspectorOverlayId(null);
+    setPullListHighlight(null);
     setInspectorRotationPreview(null);
     setContextMenu(null);
     setFogToolActive(false);
@@ -981,11 +1007,96 @@ export function App() {
       });
   };
 
+  const cancelSmoothPan = useCallback(() => {
+    if (panAnimFrameRef.current !== null) {
+      window.cancelAnimationFrame(panAnimFrameRef.current);
+      panAnimFrameRef.current = null;
+    }
+  }, []);
+
+  const handleCameraChange = useCallback(
+    (next: Camera | ((prev: Camera) => Camera)) => {
+      cancelSmoothPan();
+      setCamera(next);
+    },
+    [cancelSmoothPan],
+  );
+
+  const smoothPanToWorldIfNeeded = useCallback(
+    (worldX: number, worldY: number) => {
+      cancelSmoothPan();
+      const targetCam = computePanToFocusCamera(
+        cameraRef.current,
+        worldX,
+        worldY,
+        viewportSizeRef.current.width,
+        viewportSizeRef.current.height,
+        64,
+      );
+      if (!targetCam) return;
+
+      const startCam = cameraRef.current;
+      const startTime = performance.now();
+      const durationMs = 260;
+
+      const step = (now: number) => {
+        const progress = Math.min(1, (now - startTime) / durationMs);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        setCamera((prev) => ({
+          ...prev,
+          x: startCam.x + (targetCam.x - startCam.x) * eased,
+          y: startCam.y + (targetCam.y - startCam.y) * eased,
+        }));
+        if (progress < 1) {
+          panAnimFrameRef.current = window.requestAnimationFrame(step);
+        } else {
+          panAnimFrameRef.current = null;
+        }
+      };
+
+      panAnimFrameRef.current = window.requestAnimationFrame(step);
+    },
+    [cancelSmoothPan],
+  );
+
+  const handleFocusPullListHost = useCallback(
+    (coord: AxialCoord) => {
+      setActiveBrush(null);
+      setFogToolActive(false);
+      setContextMenu(null);
+      setSelectedCoord(coord);
+      setFocusedOverlayId(null);
+      const { x, y } = axialToWorld(coord.q, coord.r, HEX_RADIUS);
+      smoothPanToWorldIfNeeded(x, y);
+    },
+    [smoothPanToWorldIfNeeded],
+  );
+
+  const handleFocusPullListOverlay = useCallback(
+    (hostCoord: AxialCoord, overlayId: string) => {
+      setActiveBrush(null);
+      setFogToolActive(false);
+      setContextMenu(null);
+      setSelectedCoord(hostCoord);
+      setFocusedOverlayId(overlayId);
+      const match = findOverlayById(historyRef.current.present, overlayId);
+      if (match) {
+        const world = overlayLocalToWorld(match.host, match.overlay);
+        smoothPanToWorldIfNeeded(world.x, world.y);
+      } else {
+        const { x, y } = axialToWorld(hostCoord.q, hostCoord.r, HEX_RADIUS);
+        smoothPanToWorldIfNeeded(x, y);
+      }
+    },
+    [smoothPanToWorldIfNeeded],
+  );
+
   const handleViewportSizeChange = useCallback((nextSize: { width: number; height: number }) => {
     setViewportSize(nextSize);
   }, []);
 
   const handleFitToContent = () => {
+    cancelSmoothPan();
     setCamera(computeFitCamera(placements, viewportSize.width, viewportSize.height, 56));
   };
 
@@ -1001,6 +1112,9 @@ export function App() {
   useEffect(() => {
     if (rightDrawerCollapsed || rightDrawerTab !== 'inspector') {
       setHoveredInspectorOverlayId(null);
+    }
+    if (rightDrawerCollapsed || rightDrawerTab !== 'pull-list') {
+      setPullListHighlight(null);
     }
   }, [rightDrawerCollapsed, rightDrawerTab]);
 
@@ -1033,9 +1147,9 @@ export function App() {
         pullListOpen={pullListToolbarActive}
         onTogglePullList={handleTogglePullListFromToolbar}
         zoom={camera.zoom}
-        onZoomIn={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom * 1.25) }))}
-        onZoomOut={() => setCamera((c) => ({ ...c, zoom: clampZoom(c.zoom / 1.25) }))}
-        onResetZoom={() => setCamera((c) => ({ ...c, zoom: 1 }))}
+        onZoomIn={() => handleCameraChange((c) => ({ ...c, zoom: clampZoom(c.zoom * 1.25) }))}
+        onZoomOut={() => handleCameraChange((c) => ({ ...c, zoom: clampZoom(c.zoom / 1.25) }))}
+        onResetZoom={() => handleCameraChange((c) => ({ ...c, zoom: 1 }))}
         onFitToContent={handleFitToContent}
         activeBrush={activeBrush}
         onClearBrush={() => setActiveBrush(null)}
@@ -1116,15 +1230,17 @@ export function App() {
           selectedCoord={selectedCoord}
           focusedOverlayId={focusedOverlayId}
           hoveredInspectorOverlayId={hoveredInspectorOverlayId}
+          pullListHighlight={pullListHighlight}
           inspectorRotationPreview={inspectorRotationPreview}
           rightDrawerCollapsed={rightDrawerCollapsed}
           contextMenu={contextMenu}
           onContextMenuChange={setContextMenu}
           overBudgetCoords={collectionUsage.overBudgetCoords}
+          overBudgetOverlayIds={collectionUsage.overBudgetOverlayIds}
           showGrid={showGrid}
           showLabels={showLabels}
           camera={camera}
-          onCameraChange={setCamera}
+          onCameraChange={handleCameraChange}
           onViewportSizeChange={handleViewportSizeChange}
           onPlaceAt={(coord) => handlePlaceAt(coord)}
           onDropFaceAt={(coord, brush) => handlePlaceAt(coord, brush)}
@@ -1170,6 +1286,9 @@ export function App() {
             onSelectHostCoord={handleSelectHostOnly}
             onFocusOverlayId={setFocusedOverlayId}
             onHoverOverlayId={setHoveredInspectorOverlayId}
+            onHoverPullListHighlight={setPullListHighlight}
+            onFocusPullListHost={handleFocusPullListHost}
+            onFocusPullListOverlay={handleFocusPullListOverlay}
             onRotateHost={handleRotateHost}
             onFlipHost={handleFlipHost}
             onToggleHostFog={handleToggleHostFog}

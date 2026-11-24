@@ -267,3 +267,37 @@ export function computeExportBounds(
     centerY: bounds.centerY,
   };
 }
+
+/**
+ * Return a panned camera centered on (targetWorldX, targetWorldY) if that point falls
+ * outside the viewport's safe margin, or null when already comfortably in view.
+ */
+export function computePanToFocusCamera(
+  camera: Camera,
+  targetWorldX: number,
+  targetWorldY: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  marginPx = 64,
+): Camera | null {
+  if (viewportWidth <= 0 || viewportHeight <= 0) {
+    return null;
+  }
+  const screen = worldToScreen(targetWorldX, targetWorldY, viewportWidth, viewportHeight, camera);
+  const effMarginX = Math.min(marginPx, viewportWidth * 0.25);
+  const effMarginY = Math.min(marginPx, viewportHeight * 0.25);
+  const inView =
+    screen.x >= effMarginX &&
+    screen.x <= viewportWidth - effMarginX &&
+    screen.y >= effMarginY &&
+    screen.y <= viewportHeight - effMarginY;
+
+  if (inView) {
+    return null;
+  }
+  return {
+    x: normalizeZero(targetWorldX),
+    y: normalizeZero(targetWorldY),
+    zoom: camera.zoom,
+  };
+}
