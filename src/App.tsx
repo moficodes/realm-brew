@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { Dices, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createMap,
@@ -17,10 +17,16 @@ import {
 import { TileImageCache } from './canvas/imageCache';
 import { resolveOverlayFitAssetState } from './canvas/mapRenderer';
 import { exportMapAsPng } from './canvas/pngExporter';
+import { TileEdgeAnalyzer } from './canvas/tileEdgeAnalyzer';
 import { BundleImportDialog } from './components/BundleImportDialog';
 import { CanvasViewport } from './components/CanvasViewport';
 import { CollectionDialog, type CollectionPackKind } from './components/CollectionDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import {
+  GenerateMapDialog,
+  type EdgeAnalysisStatus,
+  type GenerateMapDialogSubmit,
+} from './components/GenerateMapDialog';
 import type { OverlayContextMenuState } from './components/OverlayContextMenu';
 import { PngExportDialog } from './components/PngExportDialog';
 import type { PullListSubView } from './components/PullListPanel';
@@ -40,6 +46,8 @@ import {
   computeFitCameraWithOverlays,
   overlayLocalToWorld,
 } from './domain/overlayGeometry';
+import { generateSeamlessMap } from './domain/mapGenerator';
+import type { TileEdgeIndex } from './domain/tileEdges';
 import {
   applyFogStroke,
   attachOverlayAtWorld,
@@ -148,6 +156,25 @@ export function App() {
   const [bundleDialogOpen, setBundleDialogOpen] = useState(false);
   const [storedPacks, setStoredPacks] = useState<StoredPackSummary[]>([]);
   const [collectionDialogOpen, setCollectionDialogOpen] = useState(false);
+  const [generatorDialogOpen, setGeneratorDialogOpen] = useState(false);
+  const [edgeIndex, setEdgeIndex] = useState<TileEdgeIndex>(() => new Map());
+  const [edgeAnalysisStatus, setEdgeAnalysisStatus] = useState<EdgeAnalysisStatus>({
+    state: 'idle',
+    analyzed: 0,
+    total: 0,
+  });
+  const [lastGenConfig, setLastGenConfig] = useState<{
+    selectedTilesetIds: string[];
+    targetTileCount: number;
+  } | null>(null);
+  const [lastGenToast, setLastGenToast] = useState<{
+    placedCount: number;
+    requestedCount: number;
+    openPerimeterEdges: number;
+    matchedSeams: number;
+    selectedTilesetIds: string[];
+    targetTileCount: number;
+  } | null>(null);
   const [pngExportOpen, setPngExportOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [deleteMapConfirmOpen, setDeleteMapConfirmOpen] = useState(false);
@@ -183,6 +210,7 @@ export function App() {
   const collectionSaveSeqRef = useRef(0);
   const didAutoOpenBundleRef = useRef(false);
   const imageCache = useMemo(() => new TileImageCache(), []);
+  const edgeAnalyzer = useMemo(() => new TileEdgeAnalyzer(), []);
 
   const saveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<{ id: string; name: string; placements: Placement[] } | null>(null);
@@ -283,6 +311,7 @@ export function App() {
       setPullListHighlight(null);
       setInspectorRotationPreview(null);
       setContextMenu(null);
+      setLastGenToast(null);
       setSaveStatus('saved');
       cancelSmoothPan();
       const size = viewportSizeRef.current;
@@ -373,6 +402,7 @@ export function App() {
     }
 
     imageCache.clear();
+    edgeAnalyzer.clear();
     overlayPacksByIdRef.current = nextOverlayPacks;
     setTilesets(tilesetList.tilesets);
     setOverlayPacks(tilesetList.overlayPacks);
@@ -406,7 +436,50 @@ export function App() {
         url: overlay.url,
       };
     });
-  }, [imageCache]);
+  }, [imageCache, edgeAnalyzer]);
+
+  useEffect(() => {
+    if (tilesets.length === 0) {
+      setEdgeIndex(new Map());
+      setEdgeAnalysisStatus({ state: 'idle', analyzed: 0, total: 0 });
+      return;
+    }
+
+    const controller = new AbortController();
+    const totalFaces = tilesets.reduce(
+      (sum, ts) => sum + ts.tiles.reduce((tSum, t) => tSum + (t.isSymmetric ? 1 : 2), 0),
+      0,
+    );
+    setEdgeAnalysisStatus({ state: 'analyzing', analyzed: 0, total: totalFaces });
+
+    edgeAnalyzer
+      .analyzeTilesets(tilesets, imageCache, {
+        signal: controller.signal,
+        onProgress: ({ analyzed, total }) => {
+          if (!controller.signal.aborted) {
+            setEdgeAnalysisStatus({ state: 'analyzing', analyzed, total });
+          }
+        },
+      })
+      .then((nextIndex) => {
+        if (controller.signal.aborted) return;
+        setEdgeIndex(nextIndex);
+        setEdgeAnalysisStatus({ state: 'ready', analyzed: nextIndex.size, total: totalFaces });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setEdgeAnalysisStatus({
+          state: 'error',
+          analyzed: 0,
+          total: totalFaces,
+          error: err instanceof Error ? err.message : 'Unable to analyze Tile edges',
+        });
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [tilesets, edgeAnalyzer, imageCache]);
 
   const collectionUsage = useMemo(
     () => computeCollectionUsage(placements, tilesets, collection, overlayPacks),
@@ -911,6 +984,8 @@ export function App() {
       setInspectorRotationPreview(null);
       setContextMenu(null);
       setCollectionDialogOpen(false);
+      setGeneratorDialogOpen(false);
+      setLastGenToast(null);
       setPngExportOpen(false);
       setClearConfirmOpen(false);
       setDeleteMapConfirmOpen(false);
@@ -1012,6 +1087,114 @@ export function App() {
         : DEFAULT_CAMERA,
     );
   }, [cancelSmoothPan, imageCache]);
+
+  const applyGeneratedInPlace = useCallback(
+    (
+      result: ReturnType<typeof generateSeamlessMap>,
+      selectedTilesetIds: string[],
+      targetTileCount: number,
+    ) => {
+      activeBrushRef.current = null;
+      fogToolActiveRef.current = false;
+      selectedCoordRef.current = null;
+      focusedOverlayIdRef.current = null;
+      contextMenuRef.current = null;
+      setActiveBrush(null);
+      setFogToolActive(false);
+      setSelectedCoord(null);
+      setFocusedOverlayId(null);
+      setHoveredInspectorOverlayId(null);
+      setPullListHighlight(null);
+      setInspectorRotationPreview(null);
+      setContextMenu(null);
+
+      applyCommittedPlacements(result.placements);
+      cancelSmoothPan();
+      const size = viewportSizeRef.current;
+      setCamera(
+        result.placements.length > 0
+          ? computeFitCameraWithOverlays(result.placements, size.width, size.height, {
+              padding: 56,
+              viewMode: 'gm',
+              getOverlayAssetState: (ov) =>
+                resolveOverlayFitAssetState(ov, overlayPacksByIdRef.current, imageCache),
+            })
+          : DEFAULT_CAMERA,
+      );
+      setLastGenConfig({ selectedTilesetIds, targetTileCount });
+      setLastGenToast({
+        placedCount: result.placedCount,
+        requestedCount: result.requestedCount,
+        openPerimeterEdges: result.openPerimeterEdges,
+        matchedSeams: result.matchedSeams,
+        selectedTilesetIds,
+        targetTileCount,
+      });
+    },
+    [applyCommittedPlacements, cancelSmoothPan, imageCache],
+  );
+
+  const handleGenerateMap = useCallback(
+    async ({ selectedTilesetIds, targetTileCount, destination }: GenerateMapDialogSubmit) => {
+      const result = generateSeamlessMap({
+        tilesets,
+        selectedTilesetIds,
+        collection: collectionRef.current,
+        edgeIndex,
+        targetTileCount,
+      });
+
+      setGeneratorDialogOpen(false);
+      setLastGenConfig({ selectedTilesetIds, targetTileCount });
+
+      if (destination === 'new-map') {
+        await flushPendingSave();
+        try {
+          const nextNum = maps.length + 1;
+          const created = await createMap(`Generated Map ${nextNum}`, result.placements);
+          setMaps((prev) => [toMapSummary(created), ...prev]);
+          loadMapIntoEditor(created);
+          setLastGenToast({
+            placedCount: result.placedCount,
+            requestedCount: result.requestedCount,
+            openPerimeterEdges: result.openPerimeterEdges,
+            matchedSeams: result.matchedSeams,
+            selectedTilesetIds,
+            targetTileCount,
+          });
+        } catch (err) {
+          setAppBannerError(err instanceof Error ? err.message : 'Failed to create generated Map');
+        }
+        return;
+      }
+
+      applyGeneratedInPlace(result, selectedTilesetIds, targetTileCount);
+    },
+    [
+      applyGeneratedInPlace,
+      edgeIndex,
+      flushPendingSave,
+      loadMapIntoEditor,
+      maps.length,
+      tilesets,
+    ],
+  );
+
+  const handleRerollGeneratedMap = useCallback(() => {
+    if (!lastGenToast) return;
+    const result = generateSeamlessMap({
+      tilesets,
+      selectedTilesetIds: lastGenToast.selectedTilesetIds,
+      collection: collectionRef.current,
+      edgeIndex,
+      targetTileCount: lastGenToast.targetTileCount,
+    });
+    applyGeneratedInPlace(
+      result,
+      lastGenToast.selectedTilesetIds,
+      lastGenToast.targetTileCount,
+    );
+  }, [applyGeneratedInPlace, edgeIndex, lastGenToast, tilesets]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1306,6 +1489,8 @@ export function App() {
         onRedo={handleRedo}
         onRequestClearMap={() => setClearConfirmOpen(true)}
         onOpenCollection={() => setCollectionDialogOpen(true)}
+        onOpenGenerator={() => setGeneratorDialogOpen(true)}
+        canGenerate={tilesets.length > 0}
         onOpenBundleManager={
           storageMode === 'browser' ? () => setBundleDialogOpen(true) : undefined
         }
@@ -1374,54 +1559,98 @@ export function App() {
           />
         )}
 
-        <CanvasViewport
-          placements={placements}
-          tilesetsById={tilesetsById}
-          overlayPacksById={overlayPacksById}
-          imageCache={imageCache}
-          activeBrush={activeBrush}
-          draggingBrush={draggingBrush}
-          selectedCoord={selectedCoord}
-          focusedOverlayId={focusedOverlayId}
-          hoveredInspectorOverlayId={hoveredInspectorOverlayId}
-          pullListHighlight={pullListHighlight}
-          inspectorRotationPreview={inspectorRotationPreview}
-          rightDrawerCollapsed={rightDrawerCollapsed}
-          contextMenu={contextMenu}
-          onContextMenuChange={setContextMenu}
-          overBudgetCoords={collectionUsage.overBudgetCoords}
-          overBudgetOverlayIds={collectionUsage.overBudgetOverlayIds}
-          showGrid={showGrid}
-          showLabels={showLabels}
-          camera={camera}
-          onCameraChange={handleCameraChange}
-          onViewportSizeChange={handleViewportSizeChange}
-          onPlaceAt={(coord) => handlePlaceAt(coord)}
-          onDropFaceAt={(coord, brush) => handlePlaceAt(coord, brush)}
-          onPlaceOverlayAt={(coord, wx, wy) => handlePlaceOverlayAt(coord, wx, wy)}
-          onDropOverlayAt={(coord, wx, wy, brush) => handlePlaceOverlayAt(coord, wx, wy, brush)}
-          onSelectHostOnly={handleSelectHostOnly}
-          onSelectOverlay={handleSelectOverlay}
-          onFocusOverlayFromContextMenu={handleFocusOverlayFromContextMenu}
-          onSelectHostFromContextMenu={handleSelectHostFromContextMenu}
-          onClearBrush={() => setActiveBrush(null)}
-          onMoveOrSwap={handleMoveOrSwap}
-          onMoveOrReparentOverlay={handleMoveOrReparentOverlay}
-          onSetOverlayWorldRotation={handleSetOverlayWorldRotation}
-          onRemoveAt={(coord) => handleRemoveAt(coord)}
-          onRemoveOverlayAt={(hostCoord, overlayId) => handleRemoveOverlay(hostCoord, overlayId)}
-          onRotateAction={handleRotateAction}
-          onFlipAction={handleFlipAction}
-          onExpandInspector={handleExpandInspector}
-          viewMode={viewMode}
-          fogToolActive={fogToolActive}
-          coveredCount={coveredCount}
-          onExitFogTool={() => setFogToolActive(false)}
-          onCoverAll={handleCoverAllFog}
-          onRevealAll={handleRevealAllFog}
-          onToggleHostFog={handleToggleHostFog}
-          onCommitFogStroke={handleCommitFogStroke}
-        />
+        <div className="relative flex min-w-0 flex-1">
+          <CanvasViewport
+            placements={placements}
+            tilesetsById={tilesetsById}
+            overlayPacksById={overlayPacksById}
+            imageCache={imageCache}
+            activeBrush={activeBrush}
+            draggingBrush={draggingBrush}
+            selectedCoord={selectedCoord}
+            focusedOverlayId={focusedOverlayId}
+            hoveredInspectorOverlayId={hoveredInspectorOverlayId}
+            pullListHighlight={pullListHighlight}
+            inspectorRotationPreview={inspectorRotationPreview}
+            rightDrawerCollapsed={rightDrawerCollapsed}
+            contextMenu={contextMenu}
+            onContextMenuChange={setContextMenu}
+            overBudgetCoords={collectionUsage.overBudgetCoords}
+            overBudgetOverlayIds={collectionUsage.overBudgetOverlayIds}
+            showGrid={showGrid}
+            showLabels={showLabels}
+            camera={camera}
+            onCameraChange={handleCameraChange}
+            onViewportSizeChange={handleViewportSizeChange}
+            onPlaceAt={(coord) => handlePlaceAt(coord)}
+            onDropFaceAt={(coord, brush) => handlePlaceAt(coord, brush)}
+            onPlaceOverlayAt={(coord, wx, wy) => handlePlaceOverlayAt(coord, wx, wy)}
+            onDropOverlayAt={(coord, wx, wy, brush) => handlePlaceOverlayAt(coord, wx, wy, brush)}
+            onSelectHostOnly={handleSelectHostOnly}
+            onSelectOverlay={handleSelectOverlay}
+            onFocusOverlayFromContextMenu={handleFocusOverlayFromContextMenu}
+            onSelectHostFromContextMenu={handleSelectHostFromContextMenu}
+            onClearBrush={() => setActiveBrush(null)}
+            onMoveOrSwap={handleMoveOrSwap}
+            onMoveOrReparentOverlay={handleMoveOrReparentOverlay}
+            onSetOverlayWorldRotation={handleSetOverlayWorldRotation}
+            onRemoveAt={(coord) => handleRemoveAt(coord)}
+            onRemoveOverlayAt={(hostCoord, overlayId) => handleRemoveOverlay(hostCoord, overlayId)}
+            onRotateAction={handleRotateAction}
+            onFlipAction={handleFlipAction}
+            onExpandInspector={handleExpandInspector}
+            viewMode={viewMode}
+            fogToolActive={fogToolActive}
+            coveredCount={coveredCount}
+            onExitFogTool={() => setFogToolActive(false)}
+            onCoverAll={handleCoverAllFog}
+            onRevealAll={handleRevealAllFog}
+            onToggleHostFog={handleToggleHostFog}
+            onCommitFogStroke={handleCommitFogStroke}
+          />
+
+          {viewMode === 'gm' && lastGenToast && (
+            <div
+              role="status"
+              className="pointer-events-none absolute inset-x-0 top-3 z-20 flex justify-center px-3"
+            >
+              <div className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-[#2e2a26] bg-[#161412]/95 px-3.5 py-1.5 text-xs text-stone-200 shadow-xl backdrop-blur">
+                <Dices className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                <span>
+                  Generated{' '}
+                  <strong className="font-semibold text-stone-100">
+                    {lastGenToast.placedCount}
+                  </strong>{' '}
+                  {lastGenToast.placedCount === 1 ? 'Tile' : 'Tiles'} ·{' '}
+                  {lastGenToast.matchedSeams} matched{' '}
+                  {lastGenToast.matchedSeams === 1 ? 'seam' : 'seams'} ·{' '}
+                  {lastGenToast.openPerimeterEdges === 0
+                    ? 'Fully sealed'
+                    : `${lastGenToast.openPerimeterEdges} open ${
+                        lastGenToast.openPerimeterEdges === 1 ? 'exit' : 'exits'
+                      }`}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleRerollGeneratedMap}
+                  title="Generate another variation with the same settings (undoable)"
+                  className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-medium text-amber-200 transition hover:bg-amber-500/25"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  <span>Re-roll</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLastGenToast(null)}
+                  aria-label="Dismiss generated Map summary"
+                  className="rounded-full p-0.5 text-stone-400 transition hover:bg-stone-800 hover:text-stone-100"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
 
         {viewMode === 'gm' && (
           <RightDrawer
@@ -1464,6 +1693,20 @@ export function App() {
         overlayPacks={overlayPacks}
         collection={collection}
         onChangeCopies={handleChangeCopies}
+      />
+
+      <GenerateMapDialog
+        open={viewMode === 'gm' && generatorDialogOpen}
+        onClose={() => setGeneratorDialogOpen(false)}
+        tilesets={tilesets}
+        collection={collection}
+        edgeIndex={edgeIndex}
+        analysisStatus={edgeAnalysisStatus}
+        hasExistingPlacements={placements.length > 0}
+        initialSelectedTilesetIds={lastGenConfig?.selectedTilesetIds ?? []}
+        initialTargetCount={lastGenConfig?.targetTileCount ?? 24}
+        onOpenCollection={() => setCollectionDialogOpen(true)}
+        onGenerate={(params) => void handleGenerateMap(params)}
       />
 
       {storageMode === 'browser' && (

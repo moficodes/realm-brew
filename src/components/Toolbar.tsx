@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ClipboardList,
   CloudFog,
+  Dices,
   Eraser,
   Eye,
   EyeOff,
@@ -64,6 +65,8 @@ interface ToolbarProps {
   onRedo: () => void;
   onRequestClearMap: () => void;
   onOpenCollection: () => void;
+  onOpenGenerator: () => void;
+  canGenerate: boolean;
   onOpenBundleManager?: () => void;
   bundleLoaded?: boolean;
   onOpenPngExport: () => void;
@@ -112,6 +115,8 @@ export function Toolbar({
   onRedo,
   onRequestClearMap,
   onOpenCollection,
+  onOpenGenerator,
+  canGenerate,
   onOpenBundleManager,
   bundleLoaded = true,
   onOpenPngExport,
@@ -231,7 +236,7 @@ export function Toolbar({
   if (viewMode === 'player') {
     return (
       <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#2e2a26] bg-[#161412] px-3 py-1.5">
-        <div className="flex shrink-0 items-center gap-2.5">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2.5">
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-sky-500/15 text-sky-400 ring-1 ring-sky-500/30">
             <Hexagon className="h-4 w-4" />
           </div>
@@ -243,7 +248,7 @@ export function Toolbar({
           </span>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
           {viewModeToggle}
           {zoomAndGridControls}
         </div>
@@ -253,7 +258,7 @@ export function Toolbar({
 
   return (
     <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#2e2a26] bg-[#161412] px-3 py-1.5">
-      <div className="flex shrink-0 items-center gap-2.5">
+      <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2.5">
         <div className="flex h-7 w-7 items-center justify-center rounded-md bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30">
           <Hexagon className="h-4 w-4" />
         </div>
@@ -292,7 +297,7 @@ export function Toolbar({
         )}
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+      <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
         {activeLabel && (
           <div
             title={activeLabel}
@@ -416,6 +421,21 @@ export function Toolbar({
         >
           <Package className="h-3.5 w-3.5 text-amber-400" />
           <span>Collection</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenGenerator}
+          disabled={!canGenerate}
+          title={
+            canGenerate
+              ? 'Generate a seamless random Map from your Collection'
+              : 'Load at least one Tileset to generate a Map'
+          }
+          className="flex items-center gap-1 rounded-md border border-[#2e2a26] bg-[#1c1917] px-2 py-1.5 text-xs font-medium text-stone-300 transition-colors hover:bg-stone-800 hover:text-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Dices className="h-3.5 w-3.5 text-amber-400" />
+          <span>Generate</span>
         </button>
 
         {onOpenBundleManager && (
